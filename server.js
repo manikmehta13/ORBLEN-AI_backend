@@ -103,7 +103,7 @@ app.post("/api/gemini", async (req, res) => {
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -196,21 +196,23 @@ app.post("/api/cohere", async (req, res) => {
   }
 
   try {
-    const response = await fetch("https://api.cohere.ai/v1/generate", {
+    const response = await fetch("https://api.cohere.com/v2/chat", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "command-r-plus",
-        prompt,
+        model: "command-r-plus-08-2024",
+        messages: [{ role: "user", content: prompt }],
         max_tokens: 1500
       })
     });
     const data = await response.json();
-    if (data.message) return res.status(400).json({ error: data.message });
-    res.json({ result: data.generations[0].text });
+    if (data.message && typeof data.message === "string") return res.status(400).json({ error: data.message });
+    const text = data.message?.content?.[0]?.text;
+    if (!text) return res.status(500).json({ error: "Cohere returned an unexpected response." });
+    res.json({ result: text });
   } catch (err) {
     res.status(500).json({ error: "Cohere request failed: " + err.message });
   }
