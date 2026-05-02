@@ -27,8 +27,8 @@ app.get("/", (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  🔑 NVIDIA NIM — shared helper (OpenAI-compatible endpoint)
-//     Base URL : https://integrate.api.nvidia.com/v1
-//     Each model has its OWN key stored in a separate env var
+//     stream: false is REQUIRED — some models default to SSE
+//     streaming which breaks JSON.parse on the client.
 // ══════════════════════════════════════════════════════════════
 async function callNvidiaModel(model, apiKey, messages, res) {
   if (!apiKey) {
@@ -45,11 +45,25 @@ async function callNvidiaModel(model, apiKey, messages, res) {
         model,
         messages,
         max_tokens: 1500,
-        temperature: 0.7
+        temperature: 0.7,
+        stream: false          // ← critical: prevents SSE / NDJSON responses
       })
     });
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
+
+    // Guard: NVIDIA sometimes returns non-JSON on error (e.g. 429 HTML pages)
+    const raw = await response.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({ error: `NVIDIA NIM (${model}) returned non-JSON: ${raw.slice(0, 120)}` });
+    }
+
+    if (data.error) return res.status(400).json({ error: data.error.message || JSON.stringify(data.error) });
+    if (!data.choices?.[0]?.message?.content) {
+      return res.status(500).json({ error: `NVIDIA NIM (${model}) returned an unexpected response structure.` });
+    }
+
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
     res.status(500).json({ error: `NVIDIA NIM (${model}) request failed: ` + err.message });
@@ -58,8 +72,6 @@ async function callNvidiaModel(model, apiKey, messages, res) {
 
 // ══════════════════════════════════════════════════════════════
 //  🤖 ROUTE 1: OpenAI GPT-OSS-20b  ← via NVIDIA NIM (FREE)
-//     Replaces the old GPT-4o paid route
-//     Model string: openai/gpt-oss-20b
 // ══════════════════════════════════════════════════════════════
 app.post("/api/openai", async (req, res) => {
   const { messages } = req.body;
@@ -68,7 +80,7 @@ app.post("/api/openai", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 2: Anthropic (Claude) — unchanged
+//  🤖 ROUTE 2: Anthropic (Claude)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/claude", async (req, res) => {
   const { messages } = req.body;
@@ -101,7 +113,7 @@ app.post("/api/claude", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 3: Google (Gemini) — unchanged
+//  🤖 ROUTE 3: Google (Gemini)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemini", async (req, res) => {
   const { prompt } = req.body;
@@ -131,7 +143,7 @@ app.post("/api/gemini", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 4: Mistral AI — unchanged
+//  🤖 ROUTE 4: Mistral AI
 // ══════════════════════════════════════════════════════════════
 app.post("/api/mistral", async (req, res) => {
   const { messages } = req.body;
@@ -163,7 +175,7 @@ app.post("/api/mistral", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 5: Groq (LLaMA 3.3) — unchanged, still free
+//  🤖 ROUTE 5: Groq (LLaMA 3.3)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/groq", async (req, res) => {
   const { messages } = req.body;
@@ -195,7 +207,7 @@ app.post("/api/groq", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 6: Cohere — unchanged
+//  🤖 ROUTE 6: Cohere
 // ══════════════════════════════════════════════════════════════
 app.post("/api/cohere", async (req, res) => {
   const { prompt } = req.body;
@@ -230,7 +242,6 @@ app.post("/api/cohere", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  🆕 ROUTE 7: Meta LLaMA 3.3 70B — via NVIDIA NIM (FREE)
-//     Model string: meta/llama-3.3-70b-instruct
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-llama", async (req, res) => {
   const { messages } = req.body;
@@ -240,7 +251,6 @@ app.post("/api/nvidia-llama", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  🆕 ROUTE 8: Mistral Mixtral 8x7B — via NVIDIA NIM (FREE)
-//     Model string: mistralai/mixtral-8x7b-instruct
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-mixtral", async (req, res) => {
   const { messages } = req.body;
@@ -250,7 +260,6 @@ app.post("/api/nvidia-mixtral", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  🆕 ROUTE 9: Google Gemma 2 2B — via NVIDIA NIM (FREE)
-//     Model string: google/gemma-2-2b-it
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-gemma", async (req, res) => {
   const { messages } = req.body;
@@ -315,10 +324,12 @@ Rules:
             { role: "user", content: prompt }
           ],
           max_tokens: 500,
-          temperature: 0.3
+          temperature: 0.3,
+          stream: false
         })
       });
-      const data = await response.json();
+      const raw = await response.text();
+      const data = JSON.parse(raw);
       return res.json({ result: data.choices?.[0]?.message?.content || prompt });
     } catch (err) {
       // safe fallback
