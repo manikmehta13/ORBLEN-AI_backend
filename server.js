@@ -13,8 +13,8 @@ const app = express();
 app.use(cors({
   origin: [
     "https://nexushub-ai.netlify.app",
-    "http://localhost:3000",   // for local testing
-    "http://127.0.0.1:5500"   // for VS Code Live Server testing
+    "http://localhost:3000",
+    "http://127.0.0.1:5500"
   ]
 }));
 
@@ -25,41 +25,51 @@ app.get("/", (req, res) => {
   res.json({ status: "✅ NEXUS AI Backend is live", version: "1.0.0" });
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 1: OpenAI (GPT-4o)
-// ══════════════════════════════════════════════
-app.post("/api/openai", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(503).json({ error: "OpenAI key not configured on server." });
+// ══════════════════════════════════════════════════════════════
+//  🔑 NVIDIA NIM — shared helper (OpenAI-compatible endpoint)
+//     Base URL : https://integrate.api.nvidia.com/v1
+//     Each model has its OWN key stored in a separate env var
+// ══════════════════════════════════════════════════════════════
+async function callNvidiaModel(model, apiKey, messages, res) {
+  if (!apiKey) {
+    return res.status(503).json({ error: `NVIDIA API key for ${model} not configured on server.` });
   }
-
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "gpt-4o",
+        model,
         messages,
-        max_tokens: 1500
+        max_tokens: 1500,
+        temperature: 0.7
       })
     });
     const data = await response.json();
     if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    res.status(500).json({ error: "GPT-4o request failed: " + err.message });
+    res.status(500).json({ error: `NVIDIA NIM (${model}) request failed: ` + err.message });
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 1: OpenAI GPT-OSS-20b  ← via NVIDIA NIM (FREE)
+//     Replaces the old GPT-4o paid route
+//     Model string: openai/gpt-oss-20b
+// ══════════════════════════════════════════════════════════════
+app.post("/api/openai", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+  await callNvidiaModel("openai/gpt-oss-20b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 2: Anthropic (Claude)
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 2: Anthropic (Claude) — unchanged
+// ══════════════════════════════════════════════════════════════
 app.post("/api/claude", async (req, res) => {
   const { messages } = req.body;
   if (!messages) return res.status(400).json({ error: "messages required" });
@@ -90,9 +100,9 @@ app.post("/api/claude", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 3: Google (Gemini)
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 3: Google (Gemini) — unchanged
+// ══════════════════════════════════════════════════════════════
 app.post("/api/gemini", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -120,9 +130,9 @@ app.post("/api/gemini", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 4: Mistral AI
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 4: Mistral AI — unchanged
+// ══════════════════════════════════════════════════════════════
 app.post("/api/mistral", async (req, res) => {
   const { messages } = req.body;
   if (!messages) return res.status(400).json({ error: "messages required" });
@@ -152,9 +162,9 @@ app.post("/api/mistral", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 5: Groq (LLaMA 3.3) — FREE!
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 5: Groq (LLaMA 3.3) — unchanged, still free
+// ══════════════════════════════════════════════════════════════
 app.post("/api/groq", async (req, res) => {
   const { messages } = req.body;
   if (!messages) return res.status(400).json({ error: "messages required" });
@@ -184,9 +194,9 @@ app.post("/api/groq", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════
-//  🤖 ROUTE 6: Cohere
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🤖 ROUTE 6: Cohere — unchanged
+// ══════════════════════════════════════════════════════════════
 app.post("/api/cohere", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -218,16 +228,42 @@ app.post("/api/cohere", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════
-//  ✨ ROUTE 7: Prompt Enhancer (uses Groq — FREE)
-// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  🆕 ROUTE 7: Meta LLaMA 3.3 70B — via NVIDIA NIM (FREE)
+//     Model string: meta/llama-3.3-70b-instruct
+// ══════════════════════════════════════════════════════════════
+app.post("/api/nvidia-llama", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+  await callNvidiaModel("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages, res);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  🆕 ROUTE 8: Mistral Mixtral 8x7B — via NVIDIA NIM (FREE)
+//     Model string: mistralai/mixtral-8x7b-instruct
+// ══════════════════════════════════════════════════════════════
+app.post("/api/nvidia-mixtral", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+  await callNvidiaModel("mistralai/mixtral-8x7b-instruct", process.env.NVIDIA_KEY_MIXTRAL, messages, res);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  🆕 ROUTE 9: Google Gemma 2 2B — via NVIDIA NIM (FREE)
+//     Model string: google/gemma-2-2b-it
+// ══════════════════════════════════════════════════════════════
+app.post("/api/nvidia-gemma", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+  await callNvidiaModel("google/gemma-2-2b-it", process.env.NVIDIA_KEY_GEMMA, messages, res);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  ✨ ROUTE 10: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
+// ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
   const { prompt, targetAgent } = req.body;
   if (!prompt) return res.status(400).json({ error: "prompt required" });
-
-  // Use Groq for enhancement since it's free and fast
-  const key = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY;
-  if (!key) return res.json({ result: prompt }); // fallback: return original
 
   const systemPrompt = `You are an expert prompt engineer. Rewrite the user's prompt to be clearer, more specific, well-structured, and optimized for ${targetAgent || "an AI assistant"}.
 Rules:
@@ -236,9 +272,9 @@ Rules:
 - Remove ambiguity
 - Return ONLY the enhanced prompt, nothing else. No preamble.`;
 
-  try {
-    // Use Groq (free) for enhancement
-    if (process.env.GROQ_API_KEY) {
+  // Primary: Groq (free, fast)
+  if (process.env.GROQ_API_KEY) {
+    try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -258,30 +294,38 @@ Rules:
       const data = await response.json();
       const enhanced = data.choices?.[0]?.message?.content || prompt;
       return res.json({ result: enhanced });
+    } catch (err) {
+      // fall through to NVIDIA fallback
     }
-
-    // Fallback: OpenAI for enhancement
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: prompt }
-        ],
-        max_tokens: 500,
-        temperature: 0.3
-      })
-    });
-    const data = await response.json();
-    res.json({ result: data.choices?.[0]?.message?.content || prompt });
-  } catch (err) {
-    res.json({ result: prompt }); // safe fallback: return original prompt
   }
+
+  // Fallback: NVIDIA NIM (gpt-oss-20b) — also free
+  if (process.env.NVIDIA_KEY_GPTOSS) {
+    try {
+      const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.NVIDIA_KEY_GPTOSS}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-oss-20b",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: prompt }
+          ],
+          max_tokens: 500,
+          temperature: 0.3
+        })
+      });
+      const data = await response.json();
+      return res.json({ result: data.choices?.[0]?.message?.content || prompt });
+    } catch (err) {
+      // safe fallback
+    }
+  }
+
+  res.json({ result: prompt }); // last resort: return original
 });
 
 // ── Start server ──
@@ -289,11 +333,14 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 NEXUS AI Backend running on port ${PORT}`);
   console.log(`   Keys loaded: ${[
-    process.env.OPENAI_API_KEY   ? "✅ OpenAI"   : "❌ OpenAI",
-    process.env.ANTHROPIC_API_KEY? "✅ Claude"   : "❌ Claude",
-    process.env.GEMINI_API_KEY   ? "✅ Gemini"   : "❌ Gemini",
-    process.env.MISTRAL_API_KEY  ? "✅ Mistral"  : "❌ Mistral",
-    process.env.GROQ_API_KEY     ? "✅ Groq"     : "❌ Groq",
-    process.env.COHERE_API_KEY   ? "✅ Cohere"   : "❌ Cohere",
+    process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-20B" : "❌ GPT-OSS-20B",
+    process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
+    process.env.NVIDIA_KEY_MIXTRAL ? "✅ Mixtral 8x7B" : "❌ Mixtral 8x7B",
+    process.env.NVIDIA_KEY_GEMMA   ? "✅ Gemma 2 2B"  : "❌ Gemma 2 2B",
+    process.env.ANTHROPIC_API_KEY  ? "✅ Claude"       : "❌ Claude",
+    process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
+    process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
+    process.env.GROQ_API_KEY       ? "✅ Groq"         : "❌ Groq",
+    process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
   ].join(" | ")}`);
 });
