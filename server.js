@@ -80,49 +80,7 @@ app.post("/api/openai", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 2: Anthropic (Claude)
-//     ✦ Updated: extracts system message → top-level param
-//       so memory context is passed correctly to Claude's API
-// ══════════════════════════════════════════════════════════════
-app.post("/api/claude", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(503).json({ error: "Claude key not configured on server." });
-  }
-
-  // Claude requires system content as a top-level parameter, not a role in messages
-  const systemMsg = messages.find(m => m.role === "system");
-  const filteredMessages = messages.filter(m => m.role !== "system");
-
-  try {
-    const body = {
-      model: "claude-3-5-sonnet-20241022",
-      max_tokens: 1500,
-      messages: filteredMessages
-    };
-    if (systemMsg?.content) body.system = systemMsg.content;
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
-    res.json({ result: data.content[0].text });
-  } catch (err) {
-    res.status(500).json({ error: "Claude request failed: " + err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 3: Google (Gemini)
+//  🤖 ROUTE 2: Google (Gemini)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemini", async (req, res) => {
   const { prompt } = req.body;
@@ -152,7 +110,7 @@ app.post("/api/gemini", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 4: Mistral AI
+//  🤖 ROUTE 3: Mistral AI
 // ══════════════════════════════════════════════════════════════
 app.post("/api/mistral", async (req, res) => {
   const { messages } = req.body;
@@ -184,7 +142,7 @@ app.post("/api/mistral", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 5: Groq (LLaMA 3.3)
+//  🤖 ROUTE 4: Groq (LLaMA 3.3)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/groq", async (req, res) => {
   const { messages } = req.body;
@@ -216,7 +174,7 @@ app.post("/api/groq", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 6: Cohere
+//  🤖 ROUTE 5: Cohere
 // ══════════════════════════════════════════════════════════════
 app.post("/api/cohere", async (req, res) => {
   const { prompt } = req.body;
@@ -250,7 +208,7 @@ app.post("/api/cohere", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE 7: Meta LLaMA 3.3 70B — via NVIDIA NIM (FREE)
+//  🆕 ROUTE 6: Meta LLaMA 3.3 70B — via NVIDIA NIM (FREE)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-llama", async (req, res) => {
   const { messages } = req.body;
@@ -259,25 +217,7 @@ app.post("/api/nvidia-llama", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE 8: Mistral Mixtral 8x7B — via NVIDIA NIM (FREE)
-// ══════════════════════════════════════════════════════════════
-app.post("/api/nvidia-mixtral", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("mistralai/mixtral-8x7b-instruct", process.env.NVIDIA_KEY_MIXTRAL, messages, res);
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE 9: Google Gemma 2 2B — via NVIDIA NIM (FREE)
-// ══════════════════════════════════════════════════════════════
-app.post("/api/nvidia-gemma", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("google/gemma-2-2b-it", process.env.NVIDIA_KEY_GEMMA, messages, res);
-});
-
-// ══════════════════════════════════════════════════════════════
-//  ✨ ROUTE 10: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
+//  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
   const { prompt, targetAgent } = req.body;
@@ -453,7 +393,7 @@ OUTPUT RULES:
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🧠 ROUTE 11: Memory Extraction — uses Groq LLaMA (FREE)
+//  🧠 ROUTE 8: Memory Extraction — uses Groq LLaMA (FREE)
 //
 //  Analyzes the last few conversation turns and extracts
 //  0–3 memorable, reusable facts about the user.
@@ -539,9 +479,6 @@ app.listen(PORT, () => {
   console.log(`   Keys loaded: ${[
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-20B" : "❌ GPT-OSS-20B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
-    process.env.NVIDIA_KEY_MIXTRAL ? "✅ Mixtral 8x7B" : "❌ Mixtral 8x7B",
-    process.env.NVIDIA_KEY_GEMMA   ? "✅ Gemma 2 2B"  : "❌ Gemma 2 2B",
-    process.env.ANTHROPIC_API_KEY  ? "✅ Claude"       : "❌ Claude",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
