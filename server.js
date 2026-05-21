@@ -472,6 +472,367 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  🔬 DEEP RESEARCH MODE ENGINE
+// ══════════════════════════════════════════════════════════════
+
+const BACKEND_AGENT_NAMES = {
+  openai: "GPT-OSS 20B (NIM)",
+  "nvidia-llama": "LLaMA 3.3 70B (NIM)",
+  gemini: "Gemini Flash",
+  mistral: "Mistral Large",
+  cohere: "Cohere R+",
+  groq: "LLaMA Groq"
+};
+
+function getBackendAgentName(a) {
+  return BACKEND_AGENT_NAMES[a] || "AI Agent";
+}
+
+function getActiveAgent(requestedAgent) {
+  const keys = {
+    openai: process.env.NVIDIA_KEY_GPTOSS,
+    "nvidia-llama": process.env.NVIDIA_KEY_LLAMA,
+    gemini: process.env.GEMINI_API_KEY,
+    mistral: process.env.MISTRAL_API_KEY,
+    groq: process.env.GROQ_API_KEY,
+    cohere: process.env.COHERE_API_KEY
+  };
+
+  if (keys[requestedAgent]) {
+    return { agent: requestedAgent, fallback: false };
+  }
+
+  // Fallback order:
+  const fallbackOrder = ["gemini", "groq", "nvidia-llama", "openai", "mistral", "cohere"];
+  for (const agent of fallbackOrder) {
+    if (keys[agent]) {
+      return { agent, fallback: true, original: requestedAgent };
+    }
+  }
+
+  // Return requested as default if absolutely nothing is loaded (degrades gracefully to normal route errors)
+  return { agent: requestedAgent, fallback: false };
+}
+
+async function callNvidiaModelBackend(model, apiKey, messages) {
+  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: 2000,
+      temperature: 0.7,
+      stream: false
+    })
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  return data.choices[0].message.content;
+}
+
+async function callModelBackend(agent, messages) {
+  if (agent === "gemini") {
+    if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+    const prompt = messages[messages.length - 1].content;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      }
+    );
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.candidates[0].content.parts[0].text;
+  }
+
+  if (agent === "groq") {
+    if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages,
+        max_tokens: 2000
+      })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices[0].message.content;
+  }
+
+  if (agent === "nvidia-llama") {
+    if (!process.env.NVIDIA_KEY_LLAMA) throw new Error("NVIDIA LLaMA key not configured.");
+    return await callNvidiaModelBackend("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages);
+  }
+
+  if (agent === "openai") {
+    if (!process.env.NVIDIA_KEY_GPTOSS) throw new Error("NVIDIA GPTOSS key not configured.");
+    return await callNvidiaModelBackend("openai/gpt-oss-20b", process.env.NVIDIA_KEY_GPTOSS, messages);
+  }
+
+  if (agent === "mistral") {
+    if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
+    const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "mistral-large-latest",
+        messages,
+        max_tokens: 2000
+      })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices[0].message.content;
+  }
+
+  if (agent === "cohere") {
+    if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
+    const prompt = messages[messages.length - 1].content;
+    const response = await fetch("https://api.cohere.com/v2/chat", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "command-r-plus-08-2024",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 2000
+      })
+    });
+    const data = await response.json();
+    if (data.message && typeof data.message === "string") throw new Error(data.message);
+    const text = data.message?.content?.[0]?.text;
+    if (!text) throw new Error("Cohere returned empty response.");
+    return text;
+  }
+
+  throw new Error("Invalid agent selected.");
+}
+
+function generateUnicodeTree(plan) {
+  let tree = `Possibility Tree: "${plan.topic}"\n`;
+  tree += `├── Query Topic\n`;
+  plan.branches.forEach((b, i) => {
+    const isLastBranch = i === plan.branches.length - 1;
+    const branchPrefix = isLastBranch ? "└── " : "├── ";
+    tree += `    ${branchPrefix}Branch: ${b.name}\n`;
+
+    b.possibilities.forEach((p, j) => {
+      const isLastPoss = j === b.possibilities.length - 1;
+      const possPrefix = isLastPoss ? "└── " : "├── ";
+      const linePrefix = isLastBranch ? "        " : "    │   ";
+      tree += `${linePrefix}${possPrefix}${p}\n`;
+    });
+  });
+  return tree;
+}
+
+async function generateResearchPlan(agent, query) {
+  const systemPrompt = `Generate a comprehensive, multi-branch research plan for the query.
+Output ONLY a valid JSON object with the following structure:
+{
+  "topic": "Brief topic name",
+  "branches": [
+    { "name": "Branch title", "possibilities": ["Possibility A", "Possibility B"] }
+  ]
+}
+Ensure there are exactly 3 to 4 distinct branches, and each has 2 to 3 key possibilities. Return ONLY the raw JSON object. Do not include markdown code fences or any prose.`;
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: `Query: "${query}"` }
+  ];
+
+  const responseText = await callModelBackend(agent, messages);
+
+  let cleaned = responseText.trim();
+  cleaned = cleaned.replace(/```(?:json)?\n?/gi, "").replace(/```\n?/g, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) cleaned = match[0];
+
+  const plan = JSON.parse(cleaned);
+  if (!plan.topic || !Array.isArray(plan.branches)) {
+    throw new Error("Invalid plan structure received from model.");
+  }
+  return plan;
+}
+
+function getFallbackPlan(query) {
+  return {
+    topic: query.slice(0, 40) + "...",
+    branches: [
+      { name: "Technical Feasibility & Architecture", possibilities: ["System requirements", "Integration complexity", "Performance overhead"] },
+      { name: "Socio-Economic & Financial Impacts", possibilities: ["Adoption barriers", "Cost-benefit analysis", "Global market scale"] },
+      { name: "Future Roadmap & Strategic Directives", possibilities: ["Short-term solutions", "Long-term scalability", "Key trade-offs"] }
+    ]
+  };
+}
+
+async function expandBranchWithCoT(agent, topic, branch) {
+  const prompt = `You are an expert researcher. Conduct a deep-dive analysis on the research branch "${branch.name}" for the main research topic "${topic}".
+Focus specifically on these key possibilities: ${branch.possibilities.join(", ")}.
+
+Apply step-by-step Chain-of-Thought (CoT) reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.
+
+Write out your step-by-step reasoning explicitly. Begin with a section titled "### Chain-of-Thought Reasoning" where you walk through your logic step by step, followed by "### Key Findings & Analytical Synthesis" where you summarize your final discoveries.`;
+
+  const messages = [
+    { role: "user", content: prompt }
+  ];
+
+  return await callModelBackend(agent, messages);
+}
+
+async function synthesizeFindings(agent, topic, branchAnalyses) {
+  const branchText = Object.entries(branchAnalyses)
+    .map(([branchName, analysis]) => `## Branch: ${branchName}\n\n${analysis}`)
+    .join("\n\n");
+
+  const prompt = `You are an elite research synthesizer. Combine the following individual branch findings regarding the topic "${topic}" into a coherent, high-level strategic synthesis:
+
+${branchText}
+
+Identify key patterns, unexpected connections, global trade-offs, and construct a strategic future roadmap. Output a comprehensive, logical synthesis.`;
+
+  const messages = [
+    { role: "user", content: prompt }
+  ];
+
+  return await callModelBackend(agent, messages);
+}
+
+function formatResearchDocument(plan, branchAnalyses, synthesis) {
+  let doc = `# 🔬 Research Report: ${plan.topic}\n\n`;
+  doc += `## 📋 Table of Contents\n`;
+  doc += `1. [Possibility Tree Structure](#-possibility-tree-structure)\n`;
+  doc += `2. [Executive Summary](#-executive-summary)\n`;
+  plan.branches.forEach((b, i) => {
+    doc += `3.${i + 1} [Branch: ${b.name}](#branch-${b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")})\n`;
+  });
+  doc += `3. [Cross-Branch Strategic Synthesis](#-cross-branch-strategic-synthesis)\n`;
+  doc += `4. [Actionable Recommendations & Next Steps](#-actionable-recommendations--next-steps)\n\n`;
+
+  doc += `## 🌲 Possibility Tree Structure\n`;
+  doc += `\`\`\`text\n${generateUnicodeTree(plan)}\`\`\`\n\n`;
+
+  doc += `## 📋 Executive Summary\n`;
+  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured possibility tree, conducting parallel deep-dives using step-by-step Chain-of-Thought (CoT) reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.\n\n`;
+
+  doc += `## 🔍 Detailed Branch Analyses\n\n`;
+  plan.branches.forEach((b) => {
+    doc += `### Branch: ${b.name}\n`;
+    doc += `**Explored Possibilities:** ${b.possibilities.join(", ")}\n\n`;
+    doc += `${branchAnalyses[b.name]}\n\n`;
+  });
+
+  doc += `## 🧠 Cross-Branch Strategic Synthesis\n`;
+  doc += `${synthesis}\n\n`;
+
+  doc += `## 🚀 Actionable Recommendations & Next Steps\n`;
+  doc += `Based on the cross-disciplinary findings and technical analyses within this report, the following directives are recommended:\n`;
+  doc += `1. **Phased Implementation**: Focus on short-term high-impact branches while planning resources for long-term scalability barriers.\n`;
+  doc += `2. **Risk Mitigation**: Prioritize security and integration issues early in the developmental cycle.\n`;
+  doc += `3. **Continuous Revision**: Re-evaluate the possibility tree pathways as key technical metrics are achieved.\n`;
+
+  return doc;
+}
+
+app.post("/api/deep-research", async (req, res) => {
+  const { prompt, agent } = req.body;
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt required" });
+  }
+
+  // Set SSE Headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const activeInfo = getActiveAgent(agent);
+    const resolvedAgent = activeInfo.agent;
+
+    if (activeInfo.fallback) {
+      sendEvent({
+        type: "status",
+        message: `⚠️ API key for "${getBackendAgentName(agent)}" missing. Auto-fallback to "${getBackendAgentName(resolvedAgent)}"...`
+      });
+    }
+
+    sendEvent({ type: "status", message: "Structuring possibility tree..." });
+    let plan;
+    try {
+      plan = await generateResearchPlan(resolvedAgent, prompt);
+    } catch (err) {
+      console.error("Plan generation failed, using fallback plan:", err);
+      plan = getFallbackPlan(prompt);
+    }
+
+    sendEvent({ type: "plan", data: plan });
+
+    sendEvent({ type: "status", message: `Initiating concurrent branch analyses for ${plan.branches.length} pathways...` });
+
+    const branchAnalyses = {};
+    const branchPromises = plan.branches.map(async (branch) => {
+      sendEvent({ type: "branch_start", branch: branch.name });
+      try {
+        const analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch);
+        branchAnalyses[branch.name] = analysis;
+        sendEvent({ type: "branch_end", branch: branch.name, analysis });
+      } catch (err) {
+        console.error(`Branch ${branch.name} expansion failed:`, err);
+        const failMsg = `### Branch Analysis Failed\nAn error occurred while expanding this branch: ${err.message}`;
+        branchAnalyses[branch.name] = failMsg;
+        sendEvent({ type: "branch_end", branch: branch.name, analysis: failMsg });
+      }
+    });
+
+    await Promise.all(branchPromises);
+
+    sendEvent({ type: "status", message: "Synthesizing branch findings..." });
+    let synthesis;
+    try {
+      synthesis = await synthesizeFindings(resolvedAgent, plan.topic, branchAnalyses);
+    } catch (err) {
+      console.error("Synthesis failed, using simple summary synthesis:", err);
+      synthesis = "Cross-branch synthesis was limited due to an execution error during the synthesis phase. Detailed insights are available under each respective branch analysis above.";
+    }
+
+    sendEvent({ type: "status", message: "Assembling final research document..." });
+    const finalReport = formatResearchDocument(plan, branchAnalyses, synthesis);
+
+    sendEvent({ type: "completed", result: finalReport });
+    res.end();
+  } catch (err) {
+    console.error("Deep Research failed:", err);
+    sendEvent({ type: "error", message: err.message });
+    res.end();
+  }
+});
+
 // ── Start server ──
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
