@@ -628,7 +628,7 @@ async function callModelBackend(agent, messages) {
 }
 
 function generateUnicodeTree(plan) {
-  let tree = `Possibility Tree: "${plan.topic}"\n`;
+  let tree = `Research Map: "${plan.topic}"\n`;
   tree += `├── Query Topic\n`;
   plan.branches.forEach((b, i) => {
     const isLastBranch = i === plan.branches.length - 1;
@@ -690,9 +690,9 @@ async function expandBranchWithCoT(agent, topic, branch) {
   const prompt = `You are an expert researcher. Conduct a deep-dive analysis on the research branch "${branch.name}" for the main research topic "${topic}".
 Focus specifically on these key possibilities: ${branch.possibilities.join(", ")}.
 
-Apply step-by-step Chain-of-Thought (CoT) reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.
+Apply step-by-step analytical reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.
 
-Write out your step-by-step reasoning explicitly. Begin with a section titled "### Chain-of-Thought Reasoning" where you walk through your logic step by step, followed by "### Key Findings & Analytical Synthesis" where you summarize your final discoveries.`;
+Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step, followed by "### Key Findings & Analytical Synthesis" where you summarize your final discoveries.`;
 
   const messages = [
     { role: "user", content: prompt }
@@ -722,7 +722,7 @@ Identify key patterns, unexpected connections, global trade-offs, and construct 
 function formatResearchDocument(plan, branchAnalyses, synthesis) {
   let doc = `# 🔬 Research Report: ${plan.topic}\n\n`;
   doc += `## 📋 Table of Contents\n`;
-  doc += `1. [Possibility Tree Structure](#-possibility-tree-structure)\n`;
+  doc += `1. [Research Map Structure](#-research-map-structure)\n`;
   doc += `2. [Executive Summary](#-executive-summary)\n`;
   plan.branches.forEach((b, i) => {
     doc += `3.${i + 1} [Branch: ${b.name}](#branch-${b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")})\n`;
@@ -730,16 +730,16 @@ function formatResearchDocument(plan, branchAnalyses, synthesis) {
   doc += `3. [Cross-Branch Strategic Synthesis](#-cross-branch-strategic-synthesis)\n`;
   doc += `4. [Actionable Recommendations & Next Steps](#-actionable-recommendations--next-steps)\n\n`;
 
-  doc += `## 🌲 Possibility Tree Structure\n`;
+  doc += `## 🌲 Research Map Structure\n`;
   doc += `\`\`\`text\n${generateUnicodeTree(plan)}\`\`\`\n\n`;
 
   doc += `## 📋 Executive Summary\n`;
-  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured possibility tree, conducting parallel deep-dives using step-by-step Chain-of-Thought (CoT) reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.\n\n`;
+  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured research map, conducting parallel deep-dives using step-by-step analytical reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.\n\n`;
 
   doc += `## 🔍 Detailed Branch Analyses\n\n`;
   plan.branches.forEach((b) => {
     doc += `### Branch: ${b.name}\n`;
-    doc += `**Explored Possibilities:** ${b.possibilities.join(", ")}\n\n`;
+    doc += `**Explored Focus Areas:** ${b.possibilities.join(", ")}\n\n`;
     doc += `${branchAnalyses[b.name]}\n\n`;
   });
 
@@ -750,7 +750,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis) {
   doc += `Based on the cross-disciplinary findings and technical analyses within this report, the following directives are recommended:\n`;
   doc += `1. **Phased Implementation**: Focus on short-term high-impact branches while planning resources for long-term scalability barriers.\n`;
   doc += `2. **Risk Mitigation**: Prioritize security and integration issues early in the developmental cycle.\n`;
-  doc += `3. **Continuous Revision**: Re-evaluate the possibility tree pathways as key technical metrics are achieved.\n`;
+  doc += `3. **Continuous Revision**: Re-evaluate the research map pathways as key technical metrics are achieved.\n`;
 
   return doc;
 }
@@ -782,7 +782,7 @@ app.post("/api/deep-research", async (req, res) => {
       });
     }
 
-    sendEvent({ type: "status", message: "Structuring possibility tree..." });
+    sendEvent({ type: "status", message: "Structuring research plan..." });
     let plan;
     try {
       plan = await generateResearchPlan(resolvedAgent, prompt);
