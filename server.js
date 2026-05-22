@@ -7,6 +7,9 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
+const freeEmotionDetector = require("./services/freeEmotionDetector");
+const freeTTSOrchestrator = require("./services/freeTTSOrchestrator");
+
 const app = express();
 
 // ── CORS: Only allow your Netlify frontend ──
@@ -14,11 +17,43 @@ app.use(cors({
   origin: [
     "https://nexushub-ai.netlify.app",
     "http://localhost:3000",
-    "http://127.0.0.1:5500"
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
   ]
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+
+// Free emotion-aware TTS endpoints
+app.get("/api/tts-free/status", (req, res) => {
+  res.json(freeTTSOrchestrator.getStatus());
+});
+
+app.post("/api/tts-free", async (req, res) => {
+  try {
+    await freeTTSOrchestrator.handleTTSRequest(req, res);
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      error: err.message,
+      fallback: "web-speech"
+    });
+  }
+});
+
+app.post("/api/emotion-detect", (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: "text required" });
+  res.json(freeEmotionDetector.detectEmotion(text));
+});
+
+app.post("/api/emotion-detect-fast", (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: "text required" });
+  res.json(freeEmotionDetector.detectEmotionFast(text));
+});
 
 // ── Health check ──
 app.get("/", (req, res) => {
