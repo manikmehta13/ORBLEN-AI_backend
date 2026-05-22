@@ -1,6 +1,0 @@
-node_modules/
-.env
-tts-cache/
-*.log
-__pycache__/
-*.pyc
