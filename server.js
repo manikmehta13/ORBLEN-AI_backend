@@ -27,8 +27,6 @@ app.get("/", (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  🔑 NVIDIA NIM — shared helper (OpenAI-compatible endpoint)
-//     stream: false is REQUIRED — some models default to SSE
-//     streaming which breaks JSON.parse on the client.
 // ══════════════════════════════════════════════════════════════
 async function callNvidiaModel(model, apiKey, messages, res) {
   if (!apiKey) {
@@ -46,11 +44,10 @@ async function callNvidiaModel(model, apiKey, messages, res) {
         messages,
         max_tokens: 1500,
         temperature: 0.7,
-        stream: false          // ← critical: prevents SSE / NDJSON responses
+        stream: false
       })
     });
 
-    // Guard: NVIDIA sometimes returns non-JSON on error (e.g. 429 HTML pages)
     const raw = await response.text();
     let data;
     try {
@@ -394,16 +391,11 @@ OUTPUT RULES:
 
 // ══════════════════════════════════════════════════════════════
 //  🧠 ROUTE 8: Memory Extraction — uses Groq LLaMA (FREE)
-//
-//  Analyzes the last few conversation turns and extracts
-//  0–3 memorable, reusable facts about the user.
-//  Returns [] on any failure so frontend degrades gracefully.
 // ══════════════════════════════════════════════════════════════
 app.post("/api/extract-memory", async (req, res) => {
   const { messages } = req.body;
   if (!messages || !Array.isArray(messages)) return res.json({ memories: [] });
 
-  // Memory extraction requires Groq (free). No key → skip silently.
   if (!process.env.GROQ_API_KEY) return res.json({ memories: [] });
 
   const systemPrompt = `You are a precision memory extraction AI. Analyze this conversation snippet and extract 0–3 important, reusable facts ABOUT THE USER that would genuinely help personalize future conversations.
@@ -420,7 +412,6 @@ EXTRACTION RULES:
 Example output: [{"content":"User is a 20-year-old computer science student in India","category":"personal"},{"content":"User prefers concise, technical explanations over verbose ones","category":"preference"}]`;
 
   try {
-    // Only look at the last 4 messages (2 exchanges), filter out system role
     const convText = messages
       .filter(m => m.role !== "system")
       .slice(-4)
@@ -440,34 +431,29 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
           { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
         ],
         max_tokens: 400,
-        temperature: 0.1   // Low temp for consistent, factual extraction
+        temperature: 0.1
       })
     });
 
     const data = await response.json();
     let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
 
-    // Robustly parse JSON even if wrapped in markdown or prose
     let memories = [];
     try {
-      // Strip markdown code fences if present
       rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
-      // Extract first JSON array if there's surrounding text
       const match = rawText.match(/\[[\s\S]*\]/);
       if (match) rawText = match[0];
       memories = JSON.parse(rawText);
       if (!Array.isArray(memories)) memories = [];
-      // Validate each memory object
       memories = memories
         .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
-        .slice(0, 3); // Hard cap: 3 per extraction call
+        .slice(0, 3);
     } catch {
-      memories = []; // Parse failure → return empty gracefully
+      memories = [];
     }
 
     res.json({ memories });
   } catch (err) {
-    // Network error, quota exceeded, etc. — always return empty, never error the client
     res.json({ memories: [] });
   }
 });
@@ -503,7 +489,6 @@ function getActiveAgent(requestedAgent) {
     return { agent: requestedAgent, fallback: false };
   }
 
-  // Fallback order:
   const fallbackOrder = ["gemini", "groq", "nvidia-llama", "openai", "mistral", "cohere"];
   for (const agent of fallbackOrder) {
     if (keys[agent]) {
@@ -511,7 +496,6 @@ function getActiveAgent(requestedAgent) {
     }
   }
 
-  // Return requested as default if absolutely nothing is loaded (degrades gracefully to normal route errors)
   return { agent: requestedAgent, fallback: false };
 }
 
@@ -627,6 +611,144 @@ async function callModelBackend(agent, messages) {
   throw new Error("Invalid agent selected.");
 }
 
+// ══════════════════════════════════════════════════════════════
+//  🌐 WEB SEARCH INTELLIGENCE FOR DEEP RESEARCH
+//
+//  These helpers decide WHEN to search and retrieve context
+//  that gets injected into branch expansion prompts.
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Decides whether a research branch benefits from live web data.
+ *
+ * Logic:
+ *  - Scores the combined text (topic + branch name + possibilities) against
+ *    two signal lists.
+ *  - "Factual" signals: words that suggest real-world, current, or empirical
+ *    data would strengthen the analysis.
+ *  - "Abstract-only" signals: phrases that indicate pure theory / philosophy
+ *    where web results add noise rather than value.
+ *  - Returns true when factual signals dominate.
+ */
+function shouldUseWebSearch(topic, branch) {
+  const fullText = (
+    topic + " " + branch.name + " " + (branch.possibilities || []).join(" ")
+  ).toLowerCase();
+
+  // Signals that strongly suggest live data would help
+  const factualSignals = [
+    "current", "recent", "latest", "today", "news", "statistic", "statistics",
+    "data", "market", "trend", "trends", "price", "prices", "report", "reports",
+    "2024", "2025", "2026", "study", "studies", "research", "survey", "surveys",
+    "findings", "update", "updates", "emerging", "adoption", "growth", "forecast",
+    "forecasts", "industry", "global", "benchmark", "evidence", "technical",
+    "technology", "technologies", "implementation", "challenge", "challenges",
+    "economic", "socio", "political", "legal", "regulatory", "policy", "policies",
+    "impact", "impacts", "case study", "real-world", "practical", "application",
+    "applications", "feasibility", "advancement", "development", "breakthrough",
+    "innovation", "infrastructure", "solution", "solutions", "future", "roadmap",
+    "investment", "funding", "startup", "company", "companies", "government",
+    "regulation", "risk", "risks", "security", "privacy", "analysis", "comparison"
+  ];
+
+  // Signals that suggest purely abstract reasoning — web search adds little
+  const abstractSignals = [
+    "pure philosophy", "mathematical proof", "thought experiment",
+    "abstract theorem", "metaphysical", "hypothetical only"
+  ];
+
+  // If the branch is flagged as purely abstract, skip web search
+  if (abstractSignals.some(sig => fullText.includes(sig))) return false;
+
+  // Count how many factual signals appear
+  const hits = factualSignals.filter(sig => fullText.includes(sig)).length;
+
+  // Require at least 2 hits so trivially simple topics don't trigger a search
+  return hits >= 2;
+}
+
+/**
+ * Builds a concise, targeted search query from the topic and branch context.
+ */
+function buildBranchSearchQuery(topic, branch) {
+  const topicSlice  = topic.slice(0, 55).trim();
+  const branchSlice = branch.name.slice(0, 45).trim();
+  const possSlice   = (branch.possibilities || [])[0]?.slice(0, 35).trim() || "";
+  return [topicSlice, branchSlice, possSlice].filter(Boolean).join(" ");
+}
+
+/**
+ * Fetches live web results for a branch.
+ * Priority: Tavily (AI-optimised + answer) → DuckDuckGo (free fallback).
+ * Returns null on complete failure so callers degrade gracefully.
+ */
+async function fetchWebContextForBranch(topic, branch) {
+  const query = buildBranchSearchQuery(topic, branch);
+
+  // ── Try Tavily first (best quality) ──
+  if (process.env.TAVILY_API_KEY) {
+    try {
+      const result = await handleTavilySearch(query);
+      if (result && result.results && result.results.length > 0) {
+        return {
+          query,
+          service: "Tavily",
+          icon: "🔮",
+          results: result.results.slice(0, 5),
+          answer: result.answer || null
+        };
+      }
+    } catch (_) { /* silent — fall through */ }
+  }
+
+  // ── DuckDuckGo fallback (always free, no key needed) ──
+  try {
+    const results = await handleDuckDuckGoSearch(query);
+    if (results && results.length > 0) {
+      return {
+        query,
+        service: "DuckDuckGo",
+        icon: "🦆",
+        results: results.slice(0, 5),
+        answer: null
+      };
+    }
+  } catch (_) { /* silent */ }
+
+  return null; // No usable web data — AI will reason from training only
+}
+
+/**
+ * Formats web search results into a structured prompt injection block.
+ * Designed to be appended to branch analysis prompts.
+ */
+function formatWebContextForPrompt(webContext) {
+  if (!webContext || !webContext.results || webContext.results.length === 0) return "";
+
+  let block = "\n\n---\n";
+  block += `🌐 LIVE WEB RESEARCH DATA (Source: ${webContext.service} | Query: "${webContext.query}")\n`;
+  block += "Use the following real-world, up-to-date information to ground your analysis in current facts:\n\n";
+
+  if (webContext.answer) {
+    block += `📋 Web Summary: ${webContext.answer}\n\n`;
+  }
+
+  webContext.results.forEach((r, i) => {
+    block += `[${i + 1}] ${r.title || "Result"}\n`;
+    const snippet = (r.snippet || r.content || r.text || "").slice(0, 250);
+    if (snippet) block += `    ${snippet}\n`;
+    if (r.url) block += `    🔗 ${r.url}\n`;
+    block += "\n";
+  });
+
+  block += "---\n";
+  block += "IMPORTANT: Integrate the above web data naturally into your step-by-step reasoning. ";
+  block += "Cite specific facts or findings where they strengthen the analysis. ";
+  block += "If the web data conflicts with your training knowledge, note the discrepancy.\n";
+
+  return block;
+}
+
 function generateUnicodeTree(plan) {
   let tree = `Research Map: "${plan.topic}"\n`;
   tree += `├── Query Topic\n`;
@@ -686,40 +808,61 @@ function getFallbackPlan(query) {
   };
 }
 
-async function expandBranchWithCoT(agent, topic, branch) {
+/**
+ * Expands a single research branch using Chain-of-Thought reasoning.
+ * Optionally injects live web data when available.
+ *
+ * @param {string}      agent      - resolved AI agent key
+ * @param {string}      topic      - overall research topic
+ * @param {object}      branch     - { name, possibilities[] }
+ * @param {object|null} webContext - result from fetchWebContextForBranch, or null
+ */
+async function expandBranchWithCoT(agent, topic, branch, webContext = null) {
+  const webSection = webContext ? formatWebContextForPrompt(webContext) : "";
+  const webNote    = webContext
+    ? ` Ground your analysis in the real-world web data provided above where relevant, citing specific facts.`
+    : " Draw on your training knowledge to provide the most accurate analysis possible.";
+
   const prompt = `You are an expert researcher. Conduct a deep-dive analysis on the research branch "${branch.name}" for the main research topic "${topic}".
 Focus specifically on these key possibilities: ${branch.possibilities.join(", ")}.
-
-Apply step-by-step analytical reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.
+${webSection}
+Apply step-by-step analytical reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.${webNote}
 
 Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step, followed by "### Key Findings & Analytical Synthesis" where you summarize your final discoveries.`;
 
-  const messages = [
-    { role: "user", content: prompt }
-  ];
-
+  const messages = [{ role: "user", content: prompt }];
   return await callModelBackend(agent, messages);
 }
 
-async function synthesizeFindings(agent, topic, branchAnalyses) {
+/**
+ * Synthesizes all branch analyses into a cross-disciplinary overview.
+ * Optionally enriched with a final high-level web context pass.
+ */
+async function synthesizeFindings(agent, topic, branchAnalyses, synthesisWebContext = null) {
   const branchText = Object.entries(branchAnalyses)
     .map(([branchName, analysis]) => `## Branch: ${branchName}\n\n${analysis}`)
     .join("\n\n");
 
+  let webNote = "";
+  if (synthesisWebContext) {
+    webNote = formatWebContextForPrompt(synthesisWebContext);
+  }
+
   const prompt = `You are an elite research synthesizer. Combine the following individual branch findings regarding the topic "${topic}" into a coherent, high-level strategic synthesis:
 
 ${branchText}
-
+${webNote}
 Identify key patterns, unexpected connections, global trade-offs, and construct a strategic future roadmap. Output a comprehensive, logical synthesis.`;
 
-  const messages = [
-    { role: "user", content: prompt }
-  ];
-
+  const messages = [{ role: "user", content: prompt }];
   return await callModelBackend(agent, messages);
 }
 
-function formatResearchDocument(plan, branchAnalyses, synthesis) {
+/**
+ * Formats the final research report Markdown document.
+ * Includes a Sources section when web search was used.
+ */
+function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContexts = {}) {
   let doc = `# 🔬 Research Report: ${plan.topic}\n\n`;
   doc += `## 📋 Table of Contents\n`;
   doc += `1. [Research Map Structure](#-research-map-structure)\n`;
@@ -728,17 +871,29 @@ function formatResearchDocument(plan, branchAnalyses, synthesis) {
     doc += `3.${i + 1} [Branch: ${b.name}](#branch-${b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")})\n`;
   });
   doc += `3. [Cross-Branch Strategic Synthesis](#-cross-branch-strategic-synthesis)\n`;
-  doc += `4. [Actionable Recommendations & Next Steps](#-actionable-recommendations--next-steps)\n\n`;
+  doc += `4. [Actionable Recommendations & Next Steps](#-actionable-recommendations--next-steps)\n`;
+
+  // Add web sources section if any branches used web search
+  const webBranches = Object.entries(branchWebContexts).filter(([, ctx]) => ctx !== null);
+  if (webBranches.length > 0) {
+    doc += `5. [Web Sources Used](#-web-sources-used)\n`;
+  }
+  doc += `\n`;
 
   doc += `## 🌲 Research Map Structure\n`;
   doc += `\`\`\`text\n${generateUnicodeTree(plan)}\`\`\`\n\n`;
 
   doc += `## 📋 Executive Summary\n`;
-  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured research map, conducting parallel deep-dives using step-by-step analytical reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.\n\n`;
+  const webGroundedNote = webBranches.length > 0
+    ? ` This report is grounded in **${webBranches.length} live web search${webBranches.length > 1 ? "es" : ""}**, ensuring findings reflect current real-world data.`
+    : "";
+  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured research map, conducting parallel deep-dives using step-by-step analytical reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.${webGroundedNote}\n\n`;
 
   doc += `## 🔍 Detailed Branch Analyses\n\n`;
   plan.branches.forEach((b) => {
-    doc += `### Branch: ${b.name}\n`;
+    const usedWeb = branchWebContexts[b.name];
+    const webBadge = usedWeb ? ` 🌐 *(Web-grounded via ${usedWeb.service})*` : "";
+    doc += `### Branch: ${b.name}${webBadge}\n`;
     doc += `**Explored Focus Areas:** ${b.possibilities.join(", ")}\n\n`;
     doc += `${branchAnalyses[b.name]}\n\n`;
   });
@@ -751,6 +906,25 @@ function formatResearchDocument(plan, branchAnalyses, synthesis) {
   doc += `1. **Phased Implementation**: Focus on short-term high-impact branches while planning resources for long-term scalability barriers.\n`;
   doc += `2. **Risk Mitigation**: Prioritize security and integration issues early in the developmental cycle.\n`;
   doc += `3. **Continuous Revision**: Re-evaluate the research map pathways as key technical metrics are achieved.\n`;
+
+  // Web sources appendix
+  if (webBranches.length > 0) {
+    doc += `\n## 🌐 Web Sources Used\n`;
+    doc += `The following live web searches were performed to ground this research in current data:\n\n`;
+    webBranches.forEach(([branchName, ctx]) => {
+      doc += `### ${branchName}\n`;
+      doc += `- **Search Service:** ${ctx.service} ${ctx.icon}\n`;
+      doc += `- **Query:** \`${ctx.query}\`\n`;
+      if (ctx.answer) doc += `- **Summary:** ${ctx.answer}\n`;
+      doc += `- **Sources:**\n`;
+      ctx.results.forEach((r, i) => {
+        const title = r.title || `Result ${i + 1}`;
+        const url   = r.url || "";
+        doc += url ? `  ${i + 1}. [${title}](${url})\n` : `  ${i + 1}. ${title}\n`;
+      });
+      doc += "\n";
+    });
+  }
 
   return doc;
 }
@@ -793,36 +967,128 @@ app.post("/api/deep-research", async (req, res) => {
 
     sendEvent({ type: "plan", data: plan });
 
-    sendEvent({ type: "status", message: `Initiating concurrent branch analyses for ${plan.branches.length} pathways...` });
+    // ── Decide which branches need web search before launching parallel work ──
+    const branchSearchDecisions = {};
+    plan.branches.forEach(branch => {
+      const needsSearch = shouldUseWebSearch(plan.topic, branch);
+      branchSearchDecisions[branch.name] = needsSearch;
+    });
 
-    const branchAnalyses = {};
+    const searchCount = Object.values(branchSearchDecisions).filter(Boolean).length;
+    const searchNote  = searchCount > 0
+      ? ` (🌐 web search enabled for ${searchCount} branch${searchCount > 1 ? "es" : ""})`
+      : " (AI knowledge only — no live search needed for this topic)";
+
+    sendEvent({
+      type: "status",
+      message: `Initiating concurrent branch analyses for ${plan.branches.length} pathways${searchNote}...`
+    });
+
+    const branchAnalyses    = {};
+    const branchWebContexts = {}; // tracks which branches got web data
+
     const branchPromises = plan.branches.map(async (branch) => {
       sendEvent({ type: "branch_start", branch: branch.name });
+
+      // ── Web search phase ──
+      let webContext = null;
+      const needsSearch = branchSearchDecisions[branch.name];
+
+      if (needsSearch) {
+        const searchQuery = buildBranchSearchQuery(plan.topic, branch);
+        sendEvent({
+          type: "web_search_start",
+          branch: branch.name,
+          query: searchQuery
+        });
+
+        try {
+          webContext = await fetchWebContextForBranch(plan.topic, branch);
+          sendEvent({
+            type: "web_search_end",
+            branch: branch.name,
+            found: !!webContext,
+            service: webContext ? webContext.service : null,
+            icon: webContext ? webContext.icon : null,
+            count: webContext ? webContext.results.length : 0,
+            query: searchQuery
+          });
+        } catch (err) {
+          console.error(`Web search failed for branch "${branch.name}":`, err.message);
+          sendEvent({
+            type: "web_search_end",
+            branch: branch.name,
+            found: false,
+            service: null,
+            icon: null,
+            count: 0,
+            query: searchQuery
+          });
+        }
+      }
+
+      branchWebContexts[branch.name] = webContext; // null if not searched or failed
+
+      // ── Analysis phase ──
       try {
-        const analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch);
+        const analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
         branchAnalyses[branch.name] = analysis;
-        sendEvent({ type: "branch_end", branch: branch.name, analysis });
+        sendEvent({
+          type: "branch_end",
+          branch: branch.name,
+          analysis,
+          webUsed: !!webContext,
+          webService: webContext ? webContext.service : null
+        });
       } catch (err) {
         console.error(`Branch ${branch.name} expansion failed:`, err);
         const failMsg = `### Branch Analysis Failed\nAn error occurred while expanding this branch: ${err.message}`;
         branchAnalyses[branch.name] = failMsg;
-        sendEvent({ type: "branch_end", branch: branch.name, analysis: failMsg });
+        sendEvent({
+          type: "branch_end",
+          branch: branch.name,
+          analysis: failMsg,
+          webUsed: false,
+          webService: null
+        });
       }
     });
 
     await Promise.all(branchPromises);
 
+    // ── Synthesis phase — optionally add a topic-level search for broader context ──
     sendEvent({ type: "status", message: "Synthesizing branch findings..." });
+
+    let synthesisWebContext = null;
+    // Only do a synthesis-level search if the topic itself strongly signals recency
+    const topicNeedsSearch = shouldUseWebSearch(plan.topic, { name: "synthesis overview", possibilities: ["key trends", "current state", "recent developments"] });
+    if (topicNeedsSearch && (process.env.TAVILY_API_KEY || true)) {
+      sendEvent({ type: "synthesis_search_start", query: plan.topic });
+      try {
+        synthesisWebContext = await fetchWebContextForBranch(
+          plan.topic,
+          { name: "synthesis overview", possibilities: ["key findings", "current state"] }
+        );
+        sendEvent({
+          type: "synthesis_search_end",
+          found: !!synthesisWebContext,
+          service: synthesisWebContext ? synthesisWebContext.service : null
+        });
+      } catch (_) {
+        sendEvent({ type: "synthesis_search_end", found: false, service: null });
+      }
+    }
+
     let synthesis;
     try {
-      synthesis = await synthesizeFindings(resolvedAgent, plan.topic, branchAnalyses);
+      synthesis = await synthesizeFindings(resolvedAgent, plan.topic, branchAnalyses, synthesisWebContext);
     } catch (err) {
-      console.error("Synthesis failed, using simple summary synthesis:", err);
+      console.error("Synthesis failed:", err);
       synthesis = "Cross-branch synthesis was limited due to an execution error during the synthesis phase. Detailed insights are available under each respective branch analysis above.";
     }
 
     sendEvent({ type: "status", message: "Assembling final research document..." });
-    const finalReport = formatResearchDocument(plan, branchAnalyses, synthesis);
+    const finalReport = formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContexts);
 
     sendEvent({ type: "completed", result: finalReport });
     res.end();
@@ -1066,5 +1332,6 @@ app.listen(PORT, () => {
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
+    process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
   ].join(" | ")}`);
 });
