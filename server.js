@@ -833,6 +833,228 @@ app.post("/api/deep-research", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  🌐 WEB SEARCH ENGINE — DuckDuckGo, Tavily AI, & SerpAPI
+// ══════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: DuckDuckGo Search (FREE - No Key Needed)
+// ─────────────────────────────────────────────────────────────
+async function handleDuckDuckGoSearch(query) {
+  try {
+    const response = await fetch(
+      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&t=nexusai`
+    );
+    const data = await response.json();
+    return (data.Results || []).slice(0, 8).map(r => ({
+      title: r.Title,
+      url: r.FirstURL,
+      snippet: r.Text,
+      source: "DuckDuckGo"
+    }));
+  } catch (err) {
+    console.error("DuckDuckGo error:", err.message);
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: Tavily AI Search (AI-Optimized with Answer)
+// ─────────────────────────────────────────────────────────────
+async function handleTavilySearch(query) {
+  try {
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: process.env.TAVILY_API_KEY,
+        query: query,
+        topic: "general",
+        max_results: 8,
+        include_answer: true
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error("Tavily error:", data.error);
+      return null;
+    }
+
+    const results = (data.results || []).map(r => ({
+      title: r.title,
+      url: r.url,
+      snippet: r.content,
+      score: r.score,
+      source: "Tavily"
+    }));
+
+    return { results, answer: data.answer || null };
+  } catch (err) {
+    console.error("Tavily error:", err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: SerpAPI Search (Google Results)
+// ─────────────────────────────────────────────────────────────
+async function handleSerpAPISearch(query) {
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      api_key: process.env.SERPAPI_KEY,
+      engine: "google",
+      num: 8
+    });
+
+    const response = await fetch(`https://serpapi.com/search?${params}`);
+    const data = await response.json();
+
+    if (data.error) {
+      console.error("SerpAPI error:", data.error);
+      return [];
+    }
+
+    return (data.organic_results || []).map(r => ({
+      position: r.position,
+      title: r.title,
+      url: r.link,
+      snippet: r.snippet,
+      source: "Google (SerpAPI)"
+    }));
+  } catch (err) {
+    console.error("SerpAPI error:", err.message);
+    return [];
+  }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  ROUTE 1: Smart Web Search (Auto-selects best available)
+// ═════════════════════════════════════════════════════════════
+app.post("/api/search", async (req, res) => {
+  const { query, service } = req.body;
+  if (!query) return res.status(400).json({ error: "query required" });
+
+  console.log(`[SEARCH] Query: "${query}" | Service: ${service || "auto"}`);
+
+  // Try Tavily first (AI-optimized with answer)
+  if ((!service || service === "auto" || service === "tavily") && process.env.TAVILY_API_KEY) {
+    const tavilyResult = await handleTavilySearch(query);
+    if (tavilyResult) {
+      return res.json({
+        success: true,
+        query,
+        results: tavilyResult.results,
+        answer: tavilyResult.answer,
+        service: "tavily",
+        count: tavilyResult.results.length
+      });
+    }
+  }
+
+  // Try SerpAPI as fallback
+  if ((!service || service === "auto" || service === "serpapi") && process.env.SERPAPI_KEY) {
+    const serpResults = await handleSerpAPISearch(query);
+    if (serpResults.length > 0) {
+      return res.json({
+        success: true,
+        query,
+        results: serpResults,
+        service: "serpapi",
+        count: serpResults.length
+      });
+    }
+  }
+
+  // Fallback to DuckDuckGo (always works)
+  const ddgResults = await handleDuckDuckGoSearch(query);
+  res.json({
+    success: true,
+    query,
+    results: ddgResults,
+    service: "duckduckgo",
+    count: ddgResults.length
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
+//  ROUTE 2: DuckDuckGo Only (Free, No API Key)
+// ═════════════════════════════════════════════════════════════
+app.post("/api/search/duckduckgo", async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: "query required" });
+
+  try {
+    const results = await handleDuckDuckGoSearch(query);
+    res.json({
+      success: true,
+      query,
+      results,
+      service: "duckduckgo",
+      count: results.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Search failed: " + err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════
+//  ROUTE 3: Tavily AI Only (Best for AI Research)
+// ═════════════════════════════════════════════════════════════
+app.post("/api/search/tavily", async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: "query required" });
+
+  if (!process.env.TAVILY_API_KEY) {
+    return res.status(503).json({ error: "Tavily API key not configured on server" });
+  }
+
+  try {
+    const result = await handleTavilySearch(query);
+    if (!result) {
+      return res.status(500).json({ error: "Tavily search failed" });
+    }
+
+    res.json({
+      success: true,
+      query,
+      results: result.results,
+      answer: result.answer,
+      service: "tavily",
+      count: result.results.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Tavily error: " + err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════
+//  ROUTE 4: SerpAPI Only (Google Search Results)
+// ═════════════════════════════════════════════════════════════
+app.post("/api/search/serpapi", async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: "query required" });
+
+  if (!process.env.SERPAPI_KEY) {
+    return res.status(503).json({ error: "SerpAPI key not configured on server" });
+  }
+
+  try {
+    const results = await handleSerpAPISearch(query);
+    res.json({
+      success: true,
+      query,
+      results,
+      service: "serpapi",
+      count: results.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: "SerpAPI error: " + err.message });
+  }
+});
+
 // ── Start server ──
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
