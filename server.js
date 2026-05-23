@@ -1415,10 +1415,10 @@ DELIVERY RULES:
 
 // ── Start server ──
 // ---------------------------------------------------------------------------
-// ROUTE: ElevenLabs Text-to-Speech
+// ROUTE: Murf AI Text-to-Speech
 // POST /api/tts
 // Body: { text: string, voiceId?: string }
-// Returns: audio/mpeg
+// Returns: audio/mpeg, proxied from Murf's CDN URL
 // ---------------------------------------------------------------------------
 app.post("/api/tts", async (req, res) => {
   const { text, voiceId } = req.body;
@@ -1427,58 +1427,63 @@ app.post("/api/tts", async (req, res) => {
     return res.status(400).json({ error: "text is required" });
   }
 
-  if (!process.env.ELEVENLABS_API_KEY) {
-    return res.status(503).json({ error: "ElevenLabs API key not configured on server." });
+  if (!process.env.MURF_API_KEY || process.env.MURF_API_KEY === "your_murf_api_key_here") {
+    return res.status(503).json({ error: "Murf API key not configured on server." });
   }
 
-  const safeText = text.trim().slice(0, 5000);
-  const resolvedVoiceId =
-    voiceId ||
-    process.env.ELEVENLABS_VOICE_ID ||
-    "uIZsnBL0YK1S5j69bAih";
+  const safeText = text.trim().slice(0, 3000);
+  const resolvedVoice = voiceId || process.env.MURF_VOICE_ID || "en-US-natalie";
 
   try {
-    const elevenlabsRes = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(resolvedVoiceId)}?output_format=mp3_44100_128`,
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": process.env.ELEVENLABS_API_KEY,
-          "Content-Type": "application/json",
-          "Accept": "audio/mpeg",
-        },
-        body: JSON.stringify({
-          text: safeText,
-          model_id: "eleven_multilingual_v2",
-        }),
-      }
-    );
+    const generateRes = await fetch("https://api.murf.ai/v1/speech/generate", {
+      method: "POST",
+      headers: {
+        "api-key": process.env.MURF_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({
+        text: safeText,
+        voiceId: resolvedVoice,
+        format: "MP3",
+        modelVersion: "GEN2",
+        channelType: "MONO",
+      }),
+    });
 
-    if (!elevenlabsRes.ok) {
-      const raw = await elevenlabsRes.text();
-      let message = raw.slice(0, 300);
-      try {
-        const data = JSON.parse(raw);
-        message = data.detail?.message || data.message || data.error || message;
-      } catch {
-        // Keep the plain text message.
-      }
-      return res.status(elevenlabsRes.status).json({
-        error: `ElevenLabs request failed (${elevenlabsRes.status}): ${message}`,
+    if (!generateRes.ok) {
+      const errBody = await generateRes.json().catch(() => ({}));
+      const message = errBody.message || errBody.error || `HTTP ${generateRes.status}`;
+      return res.status(generateRes.status).json({
+        error: `Murf generate failed (${generateRes.status}): ${message}`,
       });
     }
 
-    res.setHeader("Content-Type", elevenlabsRes.headers.get("content-type") || "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store");
+    const data = await generateRes.json();
 
-    if (elevenlabsRes.body) {
-      return Readable.fromWeb(elevenlabsRes.body).pipe(res);
+    if (!data.audioFile) {
+      return res.status(500).json({ error: "Murf returned no audioFile URL." });
     }
 
-    return res.end(Buffer.from(await elevenlabsRes.arrayBuffer()));
+    const audioRes = await fetch(data.audioFile);
+
+    if (!audioRes.ok) {
+      return res.status(500).json({
+        error: `Failed to fetch Murf audio file: HTTP ${audioRes.status}`,
+      });
+    }
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "no-store");
+
+    if (audioRes.body) {
+      return Readable.fromWeb(audioRes.body).pipe(res);
+    }
+
+    return res.end(Buffer.from(await audioRes.arrayBuffer()));
   } catch (err) {
-    console.error("ElevenLabs TTS error:", err.message);
-    res.status(500).json({ error: "ElevenLabs TTS failed: " + err.message });
+    console.error("Murf TTS error:", err.message);
+    res.status(500).json({ error: "Murf TTS failed: " + err.message });
   }
 });
 
