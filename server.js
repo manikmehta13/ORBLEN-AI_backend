@@ -6,6 +6,7 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+const { Readable } = require("stream");
 
 const app = express();
 
@@ -1321,7 +1322,166 @@ app.post("/api/search/serpapi", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  🎙️ ROUTE: TTS Script Generator — rewrites AI response for speech
+// ══════════════════════════════════════════════════════════════
+app.post("/api/tts-script", async (req, res) => {
+  const { text, context } = req.body;
+  if (!text) return res.status(400).json({ error: "text required" });
+
+const REWRITER_SYSTEM = `You are a professional voice-over script writer.
+Your job: take an AI assistant's text response and rewrite it as a natural spoken-word script.
+
+VOICE TARGET:
+- Aim for a warm, bright, natural assistant voice: clear, conversational, lightly expressive, and emotionally present.
+- Keep the delivery close and friendly, with subtle confidence instead of announcer drama.
+- Use short, human pauses and gentle emphasis. Avoid sing-song, exaggerated excitement, or excessive social sounds.
+
+OUTPUT FORMAT RULES — these are strict:
+- Split the script into small spoken chunks separated by the pipe character: |
+- Each chunk = roughly one breath (8–15 words max)
+- Standalone emotional sounds are their own chunk: | [laugh] | or | [hmm] |
+- Start every chunk that needs a delivery style with the tag: [excited] Great news! |
+- Use ONLY these tags: [pause] [pause:short] [pause:long] [pause:breath] [excited] [calm] [whisper] [serious] [warm] [laugh] [chuckle] [sigh] [hmm] [list-item] [list-final] [heading] [emphasis] [question] [end-of-thought] [reset]
+- Never use tags outside brackets
+- Never invent new tags
+- The output is ONLY the pipe-delimited script — no explanations, no preamble
+
+DELIVERY RULES:
+- Match the emotional tone of the original text
+- Add [hmm] or [pause:long] where a human would naturally think or hesitate
+- Add [laugh] or [chuckle] only if the content is genuinely humorous or self-aware
+- For lists: mark each item [list-item] and the last one [list-final]
+- For headings or section transitions: use [heading] then [pause]
+- For important warnings or serious points: use [serious]
+- For warm/encouraging closings: use [warm]
+- For rhetorical questions: use [question] on that chunk
+- Add [pause:breath] between long idea clusters even mid-paragraph
+- Sentences that end a major thought get [end-of-thought]
+- Use [laugh] or [chuckle] SPARINGLY — only when the content itself is genuinely funny or playful.
+- Maximum one social sound per 200 words of input. Never add humor that wasn't in the original.`;
+
+  const messages = [
+    { role: "system", content: REWRITER_SYSTEM },
+    { role: "user", content: `Rewrite this for natural spoken delivery:\n\n${text.slice(0, 3000)}` }
+  ];
+
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages,
+          max_tokens: 1200,
+          temperature: 0.5
+        })
+      });
+      const data = await response.json();
+      const script = data.choices?.[0]?.message?.content?.trim();
+      if (script) return res.json({ script });
+    } catch (_) { /* fall through to NVIDIA fallback */ }
+  }
+
+  if (process.env.NVIDIA_KEY_GPTOSS) {
+    try {
+      const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.NVIDIA_KEY_GPTOSS}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-oss-20b",
+          messages,
+          max_tokens: 1200,
+          temperature: 0.4,
+          stream: false
+        })
+      });
+      const data = await response.json();
+      const script = data.choices?.[0]?.message?.content?.trim();
+      if (script) return res.json({ script });
+    } catch (_) { /* fall through to plain-text fallback */ }
+  }
+
+  // Fallback: return plain text as single chunk (graceful degradation)
+  res.json({ script: text });
+});
+
 // ── Start server ──
+// ---------------------------------------------------------------------------
+// ROUTE: ElevenLabs Text-to-Speech
+// POST /api/tts
+// Body: { text: string, voiceId?: string }
+// Returns: audio/mpeg
+// ---------------------------------------------------------------------------
+app.post("/api/tts", async (req, res) => {
+  const { text, voiceId } = req.body;
+
+  if (!text || !text.trim()) {
+    return res.status(400).json({ error: "text is required" });
+  }
+
+  if (!process.env.ELEVENLABS_API_KEY) {
+    return res.status(503).json({ error: "ElevenLabs API key not configured on server." });
+  }
+
+  const safeText = text.trim().slice(0, 5000);
+  const resolvedVoiceId =
+    voiceId ||
+    process.env.ELEVENLABS_VOICE_ID ||
+    "uIZsnBL0YK1S5j69bAih";
+
+  try {
+    const elevenlabsRes = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(resolvedVoiceId)}?output_format=mp3_44100_128`,
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+          "Accept": "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text: safeText,
+          model_id: "eleven_multilingual_v2",
+        }),
+      }
+    );
+
+    if (!elevenlabsRes.ok) {
+      const raw = await elevenlabsRes.text();
+      let message = raw.slice(0, 300);
+      try {
+        const data = JSON.parse(raw);
+        message = data.detail?.message || data.message || data.error || message;
+      } catch {
+        // Keep the plain text message.
+      }
+      return res.status(elevenlabsRes.status).json({
+        error: `ElevenLabs request failed (${elevenlabsRes.status}): ${message}`,
+      });
+    }
+
+    res.setHeader("Content-Type", elevenlabsRes.headers.get("content-type") || "audio/mpeg");
+    res.setHeader("Cache-Control", "no-store");
+
+    if (elevenlabsRes.body) {
+      return Readable.fromWeb(elevenlabsRes.body).pipe(res);
+    }
+
+    return res.end(Buffer.from(await elevenlabsRes.arrayBuffer()));
+  } catch (err) {
+    console.error("ElevenLabs TTS error:", err.message);
+    res.status(500).json({ error: "ElevenLabs TTS failed: " + err.message });
+  }
+});
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 NEXUS AI Backend running on port ${PORT}`);
