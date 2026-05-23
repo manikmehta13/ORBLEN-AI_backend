@@ -69,12 +69,12 @@ async function callNvidiaModel(model, apiKey, messages, res) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 1: OpenAI GPT-OSS-20b  ← via NVIDIA NIM (FREE)
+//  🤖 ROUTE 1: OpenAI GPT-OSS-120b  ← via NVIDIA NIM (FREE)
 // ══════════════════════════════════════════════════════════════
 app.post("/api/openai", async (req, res) => {
   const { messages } = req.body;
   if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("openai/gpt-oss-20b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
+  await callNvidiaModel("openai/gpt-oss-120b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -359,7 +359,7 @@ OUTPUT RULES:
     }
   }
 
-  // Fallback: NVIDIA NIM (gpt-oss-20b) — also free
+  // Fallback: NVIDIA NIM (gpt-oss-120b) — also free
   if (process.env.NVIDIA_KEY_GPTOSS) {
     try {
       const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
@@ -369,7 +369,7 @@ OUTPUT RULES:
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-20b",
+          model: "openai/gpt-oss-120b",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: prompt }
@@ -464,7 +464,7 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
 // ══════════════════════════════════════════════════════════════
 
 const BACKEND_AGENT_NAMES = {
-  openai: "GPT-OSS 20B (NIM)",
+  openai: "GPT-OSS 120B (NIM)",
   "nvidia-llama": "LLaMA 3.3 70B (NIM)",
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
@@ -565,7 +565,7 @@ async function callModelBackend(agent, messages) {
 
   if (agent === "openai") {
     if (!process.env.NVIDIA_KEY_GPTOSS) throw new Error("NVIDIA GPTOSS key not configured.");
-    return await callNvidiaModelBackend("openai/gpt-oss-20b", process.env.NVIDIA_KEY_GPTOSS, messages);
+    return await callNvidiaModelBackend("openai/gpt-oss-120b", process.env.NVIDIA_KEY_GPTOSS, messages);
   }
 
   if (agent === "mistral") {
@@ -829,7 +829,8 @@ Focus specifically on these key possibilities: ${branch.possibilities.join(", ")
 ${webSection}
 Apply step-by-step analytical reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.${webNote}
 
-Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step, followed by "### Key Findings & Analytical Synthesis" where you summarize your final discoveries.`;
+Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step.
+Follow this with a section titled "### Key Findings & Analytical Synthesis". IMPORTANT: You MUST structure the final discoveries in this section using clear bullet points or numbered lists, keeping paragraphs short and highly structured so that new users see an appealing, readable output. Do not output raw walls of text.`;
 
   const messages = [{ role: "user", content: prompt }];
   return await callModelBackend(agent, messages);
@@ -853,7 +854,8 @@ async function synthesizeFindings(agent, topic, branchAnalyses, synthesisWebCont
 
 ${branchText}
 ${webNote}
-Identify key patterns, unexpected connections, global trade-offs, and construct a strategic future roadmap. Output a comprehensive, logical synthesis.`;
+Identify key patterns, unexpected connections, global trade-offs, and construct a strategic future roadmap. Output a comprehensive, logical synthesis.
+IMPORTANT: You MUST structure your strategic synthesis thoroughly using bullet points, structured sections, and clear lists for patterns, unexpected connections, trade-offs, and roadmap items, so that the report is visually appealing, readable, and easy for new users to scan. Avoid raw walls of text.`;
 
   const messages = [{ role: "user", content: prompt }];
   return await callModelBackend(agent, messages);
@@ -1105,22 +1107,60 @@ app.post("/api/deep-research", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // ─────────────────────────────────────────────────────────────
-//  Helper: DuckDuckGo Search (FREE - No Key Needed)
+//  Helper: DuckDuckGo Search (Organic Scraper - FREE)
 // ─────────────────────────────────────────────────────────────
 async function handleDuckDuckGoSearch(query) {
   try {
-    const response = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&t=nexusai`
-    );
-    const data = await response.json();
-    return (data.Results || []).slice(0, 8).map(r => ({
-      title: r.Title,
-      url: r.FirstURL,
-      snippet: r.Text,
-      source: "DuckDuckGo"
-    }));
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const html = await response.text();
+    const results = [];
+    const resultBlocks = html.split('<div class="result results_links results_links_deep web-result');
+    
+    for (let i = 1; i < resultBlocks.length; i++) {
+      const block = resultBlocks[i];
+      const titleMatch = block.match(/class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+      
+      if (titleMatch) {
+        let urlLink = titleMatch[1];
+        if (urlLink.includes('uddg=')) {
+          const parts = urlLink.split('uddg=');
+          if (parts[1]) {
+            urlLink = decodeURIComponent(parts[1].split('&')[0]);
+          }
+        }
+        
+        if (urlLink.startsWith('//')) {
+          urlLink = 'https:' + urlLink;
+        } else if (urlLink.startsWith('/')) {
+          urlLink = 'https://duckduckgo.com' + urlLink;
+        }
+        
+        const cleanTitle = titleMatch[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+        const cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
+        
+        results.push({
+          title: cleanTitle,
+          url: urlLink,
+          snippet: cleanSnippet,
+          source: "DuckDuckGo"
+        });
+      }
+    }
+    
+    return results.slice(0, 8);
   } catch (err) {
-    console.error("DuckDuckGo error:", err.message);
+    console.error("DuckDuckGo scraper error:", err.message);
     return [];
   }
 }
@@ -1491,7 +1531,7 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 NEXUS AI Backend running on port ${PORT}`);
   console.log(`   Keys loaded: ${[
-    process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-20B" : "❌ GPT-OSS-20B",
+    process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
