@@ -215,6 +215,15 @@ app.post("/api/nvidia-llama", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  🆕 ROUTE: Google Gemma 4 31B IT — via NVIDIA NIM
+// ══════════════════════════════════════════════════════════════
+app.post("/api/gemma4", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+  await callNvidiaModel("google/gemma-4-31b-it", process.env.NVIDIA_KEY_GEMMA4, messages, res);
+});
+
+// ══════════════════════════════════════════════════════════════
 //  🆕 ROUTE: DeepSeek v4 Pro — via NVIDIA NIM
 // ══════════════════════════════════════════════════════════════
 app.post("/api/deepseek", async (req, res) => {
@@ -482,6 +491,7 @@ const BACKEND_AGENT_NAMES = {
   openai: "GPT-OSS 120B (NIM)",
   "nvidia-llama": "LLaMA 3.3 70B (NIM)",
   deepseek: "DeepSeek v4 Pro (NIM)",
+  gemma4: "Gemma 4 31B IT (NIM)",
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
   cohere: "Cohere R+",
@@ -497,6 +507,7 @@ function getActiveAgent(requestedAgent) {
     openai: process.env.NVIDIA_KEY_GPTOSS,
     "nvidia-llama": process.env.NVIDIA_KEY_LLAMA,
     deepseek: process.env.NVIDIA_KEY_DEEPSEEK,
+    gemma4: process.env.NVIDIA_KEY_GEMMA4,
     gemini: process.env.GEMINI_API_KEY,
     mistral: process.env.MISTRAL_API_KEY,
     groq: process.env.GROQ_API_KEY,
@@ -507,7 +518,7 @@ function getActiveAgent(requestedAgent) {
     return { agent: requestedAgent, fallback: false };
   }
 
-  const fallbackOrder = ["gemini", "groq", "deepseek", "nvidia-llama", "openai", "mistral", "cohere"];
+  const fallbackOrder = ["gemini", "groq", "deepseek", "gemma4", "nvidia-llama", "openai", "mistral", "cohere"];
   for (const agent of fallbackOrder) {
     if (keys[agent]) {
       return { agent, fallback: true, original: requestedAgent };
@@ -583,6 +594,11 @@ async function callModelBackend(agent, messages) {
   if (agent === "deepseek") {
     if (!process.env.NVIDIA_KEY_DEEPSEEK) throw new Error("DeepSeek key not configured.");
     return await callNvidiaModelBackend("deepseek-ai/deepseek-v4-pro", process.env.NVIDIA_KEY_DEEPSEEK, messages);
+  }
+
+  if (agent === "gemma4") {
+    if (!process.env.NVIDIA_KEY_GEMMA4) throw new Error("Gemma 4 key not configured.");
+    return await callNvidiaModelBackend("google/gemma-4-31b-it", process.env.NVIDIA_KEY_GEMMA4, messages);
   }
 
   if (agent === "openai") {
@@ -1556,6 +1572,7 @@ app.listen(PORT, () => {
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
     process.env.NVIDIA_KEY_DEEPSEEK ? "✅ DeepSeek v4 Pro" : "❌ DeepSeek v4 Pro",
+    process.env.NVIDIA_KEY_GEMMA4  ? "✅ Gemma 4 31B IT" : "❌ Gemma 4 31B IT",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
