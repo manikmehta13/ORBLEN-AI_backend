@@ -29,11 +29,13 @@ app.get("/", (req, res) => {
 // ══════════════════════════════════════════════════════════════
 //  🔑 NVIDIA NIM — shared helper (OpenAI-compatible endpoint)
 // ══════════════════════════════════════════════════════════════
-async function callNvidiaModel(model, apiKey, messages, res) {
+async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
   if (!apiKey) {
     return res.status(503).json({ error: `NVIDIA API key for ${model} not configured on server.` });
   }
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90000);
     const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -43,11 +45,14 @@ async function callNvidiaModel(model, apiKey, messages, res) {
       body: JSON.stringify({
         model,
         messages,
-        max_tokens: 1500,
-        temperature: 0.7,
+        max_tokens: opts.maxTokens || 1500,
+        temperature: opts.temperature ?? 0.7,
+        top_p: opts.topP ?? 1.0,
         stream: false
-      })
+      }),
+      signal: controller.signal
     });
+    clearTimeout(timeout);
 
     const raw = await response.text();
     let data;
@@ -64,7 +69,8 @@ async function callNvidiaModel(model, apiKey, messages, res) {
 
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    res.status(500).json({ error: `NVIDIA NIM (${model}) request failed: ` + err.message });
+    const msg = err.name === 'AbortError' ? `NVIDIA NIM (${model}) timed out after 90s.` : `NVIDIA NIM (${model}) request failed: ` + err.message;
+    res.status(500).json({ error: msg });
   }
 }
 
@@ -224,18 +230,17 @@ app.post("/api/gemma4", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE: DeepSeek v4 Pro — via NVIDIA NIM
+//  🆕 ROUTE: DeepSeek (moonshotai/kimi-k2.6) — via NVIDIA NIM
 // ══════════════════════════════════════════════════════════════
 app.post("/api/deepseek", async (req, res) => {
   const { messages } = req.body;
   if (!messages) return res.status(400).json({ error: "messages required" });
 
-  if (!process.env.NVIDIA_KEY_DEEPSEEK) {
-    return res.status(503).json({ error: "Deepseek key not configured on server." });
+  if (!process.env.NVIDIA_KEY_KIMI) {
+    return res.status(503).json({ error: "Kimi (NVIDIA NIM) API key not configured on server." });
   }
 
-  // Use the NVIDIA helper to call deepseek-ai/deepseek-v4-pro
-  await callNvidiaModel("deepseek-ai/deepseek-v4-pro", process.env.NVIDIA_KEY_DEEPSEEK, messages, res);
+  await callNvidiaModel("moonshotai/kimi-k2.6", process.env.NVIDIA_KEY_KIMI, messages, res, { maxTokens: 16384, temperature: 1.0 });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -491,7 +496,7 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
 const BACKEND_AGENT_NAMES = {
   openai: "GPT-OSS 120B (NIM)",
   "nvidia-llama": "LLaMA 3.3 70B (NIM)",
-  deepseek: "DeepSeek v4 Pro (NIM)",
+  deepseek: "Kimi K2.6 (NIM)",
   gemma4: "Gemma 4 31B IT (NIM)",
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
@@ -507,7 +512,7 @@ function getActiveAgent(requestedAgent) {
   const keys = {
     openai: process.env.NVIDIA_KEY_GPTOSS,
     "nvidia-llama": process.env.NVIDIA_KEY_LLAMA,
-    deepseek: process.env.NVIDIA_KEY_DEEPSEEK,
+    deepseek: process.env.NVIDIA_KEY_KIMI,
     gemma4: process.env.NVIDIA_KEY_GEMMA4,
     gemini: process.env.GEMINI_API_KEY,
     mistral: process.env.MISTRAL_API_KEY,
