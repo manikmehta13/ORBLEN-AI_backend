@@ -295,6 +295,7 @@ ALWAYS:
 - Preserve important constraints and details
 - Improve clarity, structure, and specificity
 - Remove ambiguity when possible
+- Use proper punctuation throughout (periods, commas, question marks, etc.)
 - Optimize for ${targetAgent || "an advanced AI assistant"}
 - Keep the prompt natural and directly usable
 - Improve quality with the MINIMUM necessary modification
