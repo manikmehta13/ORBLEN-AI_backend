@@ -215,6 +215,21 @@ app.post("/api/nvidia-llama", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  🆕 ROUTE: DeepSeek v4 Pro — via NVIDIA NIM
+// ══════════════════════════════════════════════════════════════
+app.post("/api/deepseek", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages) return res.status(400).json({ error: "messages required" });
+
+  if (!process.env.NVIDIA_KEY_DEEPSEEK) {
+    return res.status(503).json({ error: "Deepseek key not configured on server." });
+  }
+
+  // Use the NVIDIA helper to call deepseek-ai/deepseek-v4-pro
+  await callNvidiaModel("deepseek-ai/deepseek-v4-pro", process.env.NVIDIA_KEY_DEEPSEEK, messages, res);
+});
+
+// ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -466,6 +481,7 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
 const BACKEND_AGENT_NAMES = {
   openai: "GPT-OSS 120B (NIM)",
   "nvidia-llama": "LLaMA 3.3 70B (NIM)",
+  deepseek: "DeepSeek v4 Pro (NIM)",
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
   cohere: "Cohere R+",
@@ -480,6 +496,7 @@ function getActiveAgent(requestedAgent) {
   const keys = {
     openai: process.env.NVIDIA_KEY_GPTOSS,
     "nvidia-llama": process.env.NVIDIA_KEY_LLAMA,
+    deepseek: process.env.NVIDIA_KEY_DEEPSEEK,
     gemini: process.env.GEMINI_API_KEY,
     mistral: process.env.MISTRAL_API_KEY,
     groq: process.env.GROQ_API_KEY,
@@ -490,7 +507,7 @@ function getActiveAgent(requestedAgent) {
     return { agent: requestedAgent, fallback: false };
   }
 
-  const fallbackOrder = ["gemini", "groq", "nvidia-llama", "openai", "mistral", "cohere"];
+  const fallbackOrder = ["gemini", "groq", "deepseek", "nvidia-llama", "openai", "mistral", "cohere"];
   for (const agent of fallbackOrder) {
     if (keys[agent]) {
       return { agent, fallback: true, original: requestedAgent };
@@ -561,6 +578,11 @@ async function callModelBackend(agent, messages) {
   if (agent === "nvidia-llama") {
     if (!process.env.NVIDIA_KEY_LLAMA) throw new Error("NVIDIA LLaMA key not configured.");
     return await callNvidiaModelBackend("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages);
+  }
+
+  if (agent === "deepseek") {
+    if (!process.env.NVIDIA_KEY_DEEPSEEK) throw new Error("DeepSeek key not configured.");
+    return await callNvidiaModelBackend("deepseek-ai/deepseek-v4-pro", process.env.NVIDIA_KEY_DEEPSEEK, messages);
   }
 
   if (agent === "openai") {
@@ -1533,6 +1555,7 @@ app.listen(PORT, () => {
   console.log(`   Keys loaded: ${[
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
+    process.env.NVIDIA_KEY_DEEPSEEK ? "✅ DeepSeek v4 Pro" : "❌ DeepSeek v4 Pro",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
