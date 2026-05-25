@@ -1550,6 +1550,9 @@ app.post("/api/drive/list", async (req, res) => {
     });
     if (query) params.set("q", query);
     if (pageToken) params.set("pageToken", pageToken);
+    params.set("supportsAllDrives", "true");
+    params.set("includeItemsFromAllDrives", "true");
+    if (!query) params.set("q", "trashed=false");
     const url = `https://www.googleapis.com/drive/v3/files?${params}`;
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` }
@@ -1571,8 +1574,8 @@ app.post("/api/drive/read", async (req, res) => {
   const { accessToken, fileId } = req.body;
   if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
   try {
-    // First get file metadata to know mime type
-    const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size,fileExtension`, {
+    // First get file metadata to know mime type (supportsAllDrives allows shared files)
+    const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size,fileExtension&supportsAllDrives=true`, {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
     const meta = await metaRes.json();
@@ -1585,7 +1588,7 @@ app.post("/api/drive/read", async (req, res) => {
         : meta.mimeType === "application/vnd.google-apps.presentation" ? "text/plain"
         : "text/plain";
       const exportRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}&supportsAllDrives=true`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       const content = await exportRes.text();
@@ -1593,7 +1596,7 @@ app.post("/api/drive/read", async (req, res) => {
     }
 
     // Regular file — download
-    const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
     const contentType = dlRes.headers.get("content-type") || "";
@@ -1634,7 +1637,7 @@ app.post("/api/drive/write", async (req, res) => {
     const body = bodyParts.join("");
 
     const url = fileId
-      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true`
       : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 
     const method = fileId ? "PATCH" : "POST";
@@ -1662,7 +1665,7 @@ app.post("/api/drive/delete", async (req, res) => {
   const { accessToken, fileId } = req.body;
   if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
   try {
-    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${accessToken}` }
     });
@@ -1687,7 +1690,9 @@ app.post("/api/drive/search", async (req, res) => {
     const params = new URLSearchParams({
       q: `name contains '${query.replace(/'/g, "\\'")}' or fullText contains '${query.replace(/'/g, "\\'")}'`,
       pageSize: String(pageSize),
-      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink)"
+      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink)",
+      supportsAllDrives: "true",
+      includeItemsFromAllDrives: "true"
     });
     const url = `https://www.googleapis.com/drive/v3/files?${params}`;
     const response = await fetch(url, {
@@ -1736,11 +1741,12 @@ app.post("/api/drive/move", async (req, res) => {
   if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
   try {
     const params = new URLSearchParams();
+    params.set("supportsAllDrives", "true");
     if (addParents) params.set("addParents", addParents);
     if (removeParents) params.set("removeParents", removeParents);
     const body = {};
     if (newName) body.name = newName;
-    const url = `https://www.googleapis.com/drive/v3/files/${fileId}${params.toString() ? '?' + params : ''}`;
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?${params}`;
     const response = await fetch(url, {
       method: "PATCH",
       headers: {
