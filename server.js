@@ -1615,26 +1615,40 @@ app.post("/api/drive/read", async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/drive/write — create or update a file
-//  Body: { accessToken, name, content, mimeType?, parentId?, fileId? }
+//  Body: { accessToken, name, content, mimeType?, parentId?, fileId?, contentBase64?, encoding? }
+//  If encoding === "base64", contentBase64 is decoded to binary and uploaded.
 //  If fileId is provided → PATCH (update); otherwise → POST (create)
 // ─────────────────────────────────────────────────────────────
 app.post("/api/drive/write", async (req, res) => {
-  const { accessToken, name, content, mimeType = "text/plain", parentId, fileId } = req.body;
-  if (!accessToken || !name || content === undefined) {
-    return res.status(400).json({ error: "accessToken, name, and content required" });
+  const { accessToken, name, content, mimeType = "text/plain", parentId, fileId, contentBase64, encoding } = req.body;
+  if (!accessToken || !name) {
+    return res.status(400).json({ error: "accessToken and name required" });
+  }
+  if (content === undefined && !contentBase64) {
+    return res.status(400).json({ error: "content or contentBase64 required" });
   }
   try {
-    // Use multipart upload for content
     const boundary = "nexus_drive_boundary";
     const metadata = { name, mimeType };
     if (parentId) metadata.parents = [parentId];
-    
-    let bodyParts = [
+
+    // Build multipart body parts
+    const metaPart = Buffer.from(
       `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
-      `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content}\r\n`,
-      `--${boundary}--`
-    ];
-    const body = bodyParts.join("");
+      "utf-8"
+    );
+    const contentPart = encoding === "base64" && contentBase64
+      ? Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Type: ${mimeType}\r\nContent-Transfer-Encoding: base64\r\n\r\n`, "utf-8"),
+          Buffer.from(contentBase64, "base64"),
+          Buffer.from("\r\n", "utf-8")
+        ])
+      : Buffer.from(
+          `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content || ""}\r\n`,
+          "utf-8"
+        );
+    const endPart = Buffer.from(`--${boundary}--`, "utf-8");
+    const body = Buffer.concat([metaPart, contentPart, endPart]);
 
     const url = fileId
       ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true`
