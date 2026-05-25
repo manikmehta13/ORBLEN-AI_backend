@@ -1497,6 +1497,266 @@ DELIVERY RULES:
   res.json({ script: text });
 });
 
+// ══════════════════════════════════════════════════════════════
+//  ☁️ GOOGLE DRIVE API PROXY ROUTES
+//  Each accepts { accessToken, ...params } and proxies to
+//  Google Drive API v3. The access token is obtained via
+//  Firebase GoogleAuthProvider with drive.file scope.
+// ══════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: universal Drive API proxy call
+// ─────────────────────────────────────────────────────────────
+async function driveApiCall(req, res) {
+  const { accessToken, method = "GET", path, params = {} } = req.body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken required" });
+  if (!path) return res.status(400).json({ error: "path required" });
+
+  try {
+    const queryString = Object.keys(params).length ? '?' + new URLSearchParams(params) : '';
+    const url = `https://www.googleapis.com/drive/v3/${path.replace(/^\//, '')}${queryString}`;
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(method === "GET" || method === "DELETE" ? {} : { "Content-Type": "application/json" })
+      },
+      body: (method === "GET" || method === "DELETE") ? undefined : JSON.stringify(req.body.body)
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.error?.message || data.error || `Drive API error (${response.status})` });
+    }
+    res.json({ ...data, _status: response.status });
+  } catch (err) {
+    res.status(500).json({ error: "Drive API proxy failed: " + err.message });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/list — list files & folders
+//  Body: { accessToken, pageSize?, query?, pageToken? }
+//  Proxies: GET /drive/v3/files
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/list", async (req, res) => {
+  const { accessToken, pageSize = 50, query, pageToken } = req.body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken required" });
+  try {
+    const params = new URLSearchParams({
+      pageSize: String(pageSize),
+      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink,parents,createdTime,fileExtension,iconLink,thumbnailLink),nextPageToken"
+    });
+    if (query) params.set("q", query);
+    if (pageToken) params.set("pageToken", pageToken);
+    const url = `https://www.googleapis.com/drive/v3/files?${params}`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive list failed" });
+    res.json({ files: data.files || [], nextPageToken: data.nextPageToken || null });
+  } catch (err) {
+    res.status(500).json({ error: "Drive list failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/read — read file content (text/plain)
+//  Body: { accessToken, fileId }
+//  Proxies: GET /drive/v3/files/{fileId}?alt=media
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/read", async (req, res) => {
+  const { accessToken, fileId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    // First get file metadata to know mime type
+    const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size,fileExtension`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const meta = await metaRes.json();
+    if (!metaRes.ok) return res.status(metaRes.status).json({ error: meta.error?.message || "Drive metadata fetch failed" });
+
+    // If it's a Google Workspace doc, use export
+    if (meta.mimeType?.startsWith("application/vnd.google-apps")) {
+      const exportMime = meta.mimeType === "application/vnd.google-apps.document" ? "text/plain"
+        : meta.mimeType === "application/vnd.google-apps.spreadsheet" ? "text/csv"
+        : meta.mimeType === "application/vnd.google-apps.presentation" ? "text/plain"
+        : "text/plain";
+      const exportRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const content = await exportRes.text();
+      return res.json({ name: meta.name, mimeType: meta.mimeType, content });
+    }
+
+    // Regular file — download
+    const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const contentType = dlRes.headers.get("content-type") || "";
+    if (contentType.startsWith("text") || contentType.includes("json") || contentType.includes("javascript")) {
+      const content = await dlRes.text();
+      return res.json({ name: meta.name, mimeType: meta.mimeType, content });
+    }
+    // Binary — return as base64
+    const buffer = await dlRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    res.json({ name: meta.name, mimeType: meta.mimeType, contentBase64: base64, encoding: "base64", contentType });
+  } catch (err) {
+    res.status(500).json({ error: "Drive read failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/write — create or update a file
+//  Body: { accessToken, name, content, mimeType?, parentId?, fileId? }
+//  If fileId is provided → PATCH (update); otherwise → POST (create)
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/write", async (req, res) => {
+  const { accessToken, name, content, mimeType = "text/plain", parentId, fileId } = req.body;
+  if (!accessToken || !name || content === undefined) {
+    return res.status(400).json({ error: "accessToken, name, and content required" });
+  }
+  try {
+    // Use multipart upload for content
+    const boundary = "nexus_drive_boundary";
+    const metadata = { name, mimeType };
+    if (parentId) metadata.parents = [parentId];
+    
+    let bodyParts = [
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+      `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content}\r\n`,
+      `--${boundary}--`
+    ];
+    const body = bodyParts.join("");
+
+    const url = fileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+      : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+
+    const method = fileId ? "PATCH" : "POST";
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive write failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType, webViewLink: data.webViewLink } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive write failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/delete — delete a file or folder
+//  Body: { accessToken, fileId }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/delete", async (req, res) => {
+  const { accessToken, fileId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: data.error?.message || "Drive delete failed" });
+    }
+    res.json({ success: true, fileId });
+  } catch (err) {
+    res.status(500).json({ error: "Drive delete failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/search — full-text search in Drive
+//  Body: { accessToken, query, pageSize? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/search", async (req, res) => {
+  const { accessToken, query, pageSize = 20 } = req.body;
+  if (!accessToken || !query) return res.status(400).json({ error: "accessToken and query required" });
+  try {
+    const params = new URLSearchParams({
+      q: `name contains '${query.replace(/'/g, "\\'")}' or fullText contains '${query.replace(/'/g, "\\'")}'`,
+      pageSize: String(pageSize),
+      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink)"
+    });
+    const url = `https://www.googleapis.com/drive/v3/files?${params}`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive search failed" });
+    res.json({ files: data.files || [] });
+  } catch (err) {
+    res.status(500).json({ error: "Drive search failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/mkdir — create a folder
+//  Body: { accessToken, name, parentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/mkdir", async (req, res) => {
+  const { accessToken, name, parentId } = req.body;
+  if (!accessToken || !name) return res.status(400).json({ error: "accessToken and name required" });
+  try {
+    const metadata = { name, mimeType: "application/vnd.google-apps.folder" };
+    if (parentId) metadata.parents = [parentId];
+    const response = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(metadata)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive mkdir failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive mkdir failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/move — move/rename a file
+//  Body: { accessToken, fileId, newName?, parentId?, removeParentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/move", async (req, res) => {
+  const { accessToken, fileId, newName, addParents, removeParents } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const params = new URLSearchParams();
+    if (addParents) params.set("addParents", addParents);
+    if (removeParents) params.set("removeParents", removeParents);
+    const body = {};
+    if (newName) body.name = newName;
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}${params.toString() ? '?' + params : ''}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive move failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive move failed: " + err.message });
+  }
+});
+
 // ── Start server ──
 // ---------------------------------------------------------------------------
 // ROUTE: Murf AI Text-to-Speech
