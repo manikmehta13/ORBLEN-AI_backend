@@ -1639,7 +1639,7 @@ app.post("/api/drive/write", async (req, res) => {
     );
     const contentPart = encoding === "base64" && contentBase64
       ? Buffer.concat([
-          Buffer.from(`--${boundary}\r\nContent-Type: ${mimeType}\r\nContent-Transfer-Encoding: base64\r\n\r\n`, "utf-8"),
+          Buffer.from(`--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`, "utf-8"),
           Buffer.from(contentBase64, "base64"),
           Buffer.from("\r\n", "utf-8")
         ])
