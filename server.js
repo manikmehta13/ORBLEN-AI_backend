@@ -1650,9 +1650,10 @@ app.post("/api/drive/write", async (req, res) => {
     const endPart = Buffer.from(`--${boundary}--`, "utf-8");
     const body = Buffer.concat([metaPart, contentPart, endPart]);
 
+    const fieldsParam = "&fields=id%2Cname%2CmimeType%2CwebViewLink%2Csize";
     const url = fileId
-      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true`
-      : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true${fieldsParam}`
+      : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart${fieldsParam}`;
 
     const method = fileId ? "PATCH" : "POST";
     const response = await fetch(url, {
@@ -1701,8 +1702,10 @@ app.post("/api/drive/search", async (req, res) => {
   const { accessToken, query, pageSize = 20 } = req.body;
   if (!accessToken || !query) return res.status(400).json({ error: "accessToken and query required" });
   try {
+    // Escape single quotes by doubling them (Google Drive API escaping)
+    const esc = (s) => s.replace(/'/g, "\\'").replace(/\\/g, "\\\\");
     const params = new URLSearchParams({
-      q: `name contains '${query.replace(/'/g, "\\'")}' or fullText contains '${query.replace(/'/g, "\\'")}'`,
+      q: `(name contains '${esc(query)}' or fullText contains '${esc(query)}') and trashed=false`,
       pageSize: String(pageSize),
       fields: "files(id,name,mimeType,size,modifiedTime,webViewLink)",
       supportsAllDrives: "true",
@@ -1774,6 +1777,104 @@ app.post("/api/drive/move", async (req, res) => {
     res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType } });
   } catch (err) {
     res.status(500).json({ error: "Drive move failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/markdown — create a well-formatted Markdown file
+//  Body: { accessToken, name, content, frontmatter?, parentId? }
+//  - Automatically appends .md extension
+//  - Optionally prepends YAML frontmatter (object with title, date, author, tags, etc.)
+//  - Returns file ID, name, and webViewLink for immediate access
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/markdown", async (req, res) => {
+  const { accessToken, name, content, frontmatter, parentId } = req.body;
+  if (!accessToken || !name) return res.status(400).json({ error: "accessToken and name required" });
+  if (!content) return res.status(400).json({ error: "content required" });
+
+  // Ensure .md extension
+  const fileName = name.endsWith(".md") ? name : name + ".md";
+
+  try {
+    // Build final content with optional frontmatter
+    let finalContent = "";
+    if (frontmatter && typeof frontmatter === "object") {
+      const fmLines = ["---"];
+      for (const [key, val] of Object.entries(frontmatter)) {
+        const strVal = typeof val === "object" ? JSON.stringify(val) : String(val);
+        fmLines.push(`${key}: ${strVal}`);
+      }
+      fmLines.push("---\n\n");
+      finalContent = fmLines.join("\n") + content;
+    } else {
+      finalContent = content;
+    }
+
+    const boundary = "nexus_md_boundary";
+    const metadata = { name: fileName, mimeType: "text/markdown" };
+    if (parentId) metadata.parents = [parentId];
+
+    const metaPart = Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+      "utf-8"
+    );
+    const contentPart = Buffer.from(
+      `--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${finalContent}\r\n`,
+      "utf-8"
+    );
+    const endPart = Buffer.from(`--${boundary}--`, "utf-8");
+    const body = Buffer.concat([metaPart, contentPart, endPart]);
+
+    const url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname%2CmimeType%2CwebViewLink%2Csize";
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive markdown create failed" });
+    res.json({
+      file: {
+        id: data.id,
+        name: data.name,
+        mimeType: "text/markdown",
+        webViewLink: data.webViewLink
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Drive markdown create failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/copy — copy a file
+//  Body: { accessToken, fileId, name?, parentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/copy", async (req, res) => {
+  const { accessToken, fileId, name, parentId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const body = {};
+    if (name) body.name = name;
+    if (parentId) body.parents = [parentId];
+    const params = new URLSearchParams({ supportsAllDrives: "true" });
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}/copy?${params}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive copy failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType, webViewLink: data.webViewLink } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive copy failed: " + err.message });
   }
 });
 
