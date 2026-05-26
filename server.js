@@ -198,7 +198,7 @@ app.post("/api/cohere", async (req, res) => {
       body: JSON.stringify({
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 16384
+        max_tokens: 4096
       })
     });
     const data = await response.json();
@@ -643,7 +643,7 @@ async function callModelBackend(agent, messages) {
       body: JSON.stringify({
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 16384
+        max_tokens: 4096
       })
     });
     const data = await response.json();
