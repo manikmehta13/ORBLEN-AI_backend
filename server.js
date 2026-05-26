@@ -1147,6 +1147,236 @@ app.post("/api/deep-research", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  🗣️ DEBATE MODE ENGINE — Multi-agent structured debate
+// ══════════════════════════════════════════════════════════════
+
+const DEBATE_PERSONAS = [
+  { role: "The Advocate", description: "argues in favor of the topic, highlighting benefits, opportunities, and supporting evidence" },
+  { role: "The Critic", description: "challenges the topic, pointing out risks, limitations, counterarguments, and potential downsides" },
+  { role: "The Analyst", description: "provides objective, data-driven analysis without taking a side, evaluating evidence from all perspectives" },
+  { role: "The Synthesizer", description: "seeks common ground, identifies areas of agreement, and bridges opposing viewpoints" },
+  { role: "The Pragmatist", description: "focuses on practical implementation, feasibility, real-world constraints, and actionable outcomes" }
+];
+
+app.post("/api/debate", async (req, res) => {
+  const { topic, agents, rounds } = req.body;
+  if (!topic) return res.status(400).json({ error: "topic required" });
+  if (!agents || !Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
+
+  const maxRounds = Math.min(Math.max(parseInt(rounds) || 2, 1), 4);
+  const selectedAgents = agents.slice(0, 5);
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    let transcript = [];
+
+    const participants = selectedAgents.map((agent, i) => {
+      const info = getActiveAgent(agent);
+      return {
+        agent: info.agent,
+        name: getBackendAgentName(info.agent),
+        persona: DEBATE_PERSONAS[i % DEBATE_PERSONAS.length],
+        fallback: info.fallback,
+        originalAgent: info.fallback ? agent : null
+      };
+    });
+
+    // Check if any agents resolved to the same model (deduplicate)
+    const seen = new Set();
+    const uniqueParticipants = [];
+    for (const p of participants) {
+      const key = p.agent;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueParticipants.push(p);
+      }
+    }
+
+    if (uniqueParticipants.length < 2) {
+      sendEvent({ type: "error", message: "At least 2 unique agents with valid API keys are required for a debate." });
+      res.end();
+      return;
+    }
+
+    sendEvent({
+      type: "start",
+      participants: uniqueParticipants.map(p => ({
+        agent: p.agent,
+        name: p.name,
+        persona: p.persona,
+        fallback: p.fallback,
+        originalAgent: p.originalAgent
+      })),
+      topic
+    });
+
+    sendEvent({
+      type: "status",
+      message: `🗣️ Debate starting with ${uniqueParticipants.length} participants, ${maxRounds} round${maxRounds > 1 ? "s" : ""}`
+    });
+
+    const colorPalette = ["#00f5ff", "#ff2d78", "#ffbe00", "#7c3aed", "#00ff9d"];
+
+    for (let round = 1; round <= maxRounds; round++) {
+      for (let pIdx = 0; pIdx < uniqueParticipants.length; pIdx++) {
+        const p = uniqueParticipants[pIdx];
+
+        sendEvent({
+          type: "speaker_start",
+          round,
+          agent: p.agent,
+          name: p.name,
+          persona: p.persona,
+          color: colorPalette[pIdx % colorPalette.length]
+        });
+
+        const fallbackNote = p.fallback
+          ? `\n\nNOTE: API key for "${getBackendAgentName(p.originalAgent)}" was unavailable. You are responding in their place as the ${p.persona.role}.`
+          : "";
+
+        const transcriptText = transcript.length > 0
+          ? transcript.map(t => `${t.name} (${t.persona.role}):\n${t.content}`).join("\n\n---\n\n")
+          : "";
+
+        let debatePrompt;
+        if (round === 1 && pIdx === 0) {
+          debatePrompt = `You are participating in a structured multi-AI debate.
+
+DEBATE TOPIC: "${topic}"
+
+YOUR ROLE: ${p.persona.role}
+YOUR INSTRUCTION: ${p.persona.description}
+
+This is the opening statement of the debate. Present your initial position on this topic clearly and persuasively. Structure your response with:
+• Your main thesis/position on the topic
+• Key supporting arguments and reasoning
+• Evidence or examples where relevant
+
+Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
+        } else {
+          debatePrompt = `You are participating in a structured multi-AI debate.
+
+DEBATE TOPIC: "${topic}"
+
+YOUR ROLE: ${p.persona.role}
+YOUR INSTRUCTION: ${p.persona.description}
+
+Here is the debate transcript so far (Round ${round}):
+
+${transcriptText}
+
+Now it's your turn. Respond to the previous speakers. You should:
+• Directly engage with points made by other participants — address them by name
+• If you agree with something, acknowledge it and build on it
+• If you disagree, explain why with clear reasoning
+• Advance your own unique perspective based on your assigned role
+• Ask thoughtful questions to probe weaknesses in opposing arguments
+• Counter any arguments made against your position
+
+Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
+        }
+
+        const messages = [{ role: "user", content: debatePrompt }];
+
+        try {
+          const response = await callModelBackend(p.agent, messages);
+          transcript.push({
+            agent: p.agent,
+            name: p.name,
+            persona: p.persona,
+            content: response,
+            round
+          });
+          sendEvent({
+            type: "speaker_end",
+            agent: p.agent,
+            name: p.name,
+            persona: p.persona,
+            content: response,
+            color: colorPalette[pIdx % colorPalette.length],
+            round
+          });
+        } catch (err) {
+          const errorMsg = `[${p.name} is unavailable for this round: ${err.message}]`;
+          transcript.push({
+            agent: p.agent,
+            name: p.name,
+            persona: p.persona,
+            content: errorMsg,
+            round
+          });
+          sendEvent({
+            type: "speaker_end",
+            agent: p.agent,
+            name: p.name,
+            persona: p.persona,
+            content: errorMsg,
+            color: colorPalette[pIdx % colorPalette.length],
+            round,
+            error: true
+          });
+        }
+      }
+    }
+
+    // ── Synthesis Phase ──
+    sendEvent({ type: "status", message: "🧠 Synthesizing debate into a final consensus..." });
+
+    const fullTranscript = transcript.map(t =>
+      `--- ${t.name} (${t.persona.role}) - Round ${t.round} ---\n${t.content}`
+    ).join("\n\n");
+
+    const synthesisPrompt = `You are a neutral debate moderator and expert synthesis analyst.
+
+DEBATE TOPIC: "${topic}"
+
+Below is the full transcript of a structured multi-AI debate between participants with different assigned perspectives:
+
+${fullTranscript}
+
+Your task: synthesize this debate into a clear, balanced, and actionable final document. Structure your response with these sections:
+
+## 📋 Executive Summary
+A brief 2-3 sentence overview of the debate's outcome and key takeaways.
+
+## 🔑 Areas of Agreement
+List the main points where participants reached consensus or found common ground.
+
+## ⚡ Areas of Disagreement
+Summarize the key disagreements and the reasoning behind each side's position.
+
+## 🏁 Final Consensus
+A comprehensive, balanced conclusion that incorporates the strongest arguments from all sides. This should be a well-reasoned answer that a neutral observer would find fair and complete.
+
+Keep your synthesis thorough but readable. Use proper punctuation throughout.`;
+
+    const synthesisMessages = [{ role: "user", content: synthesisPrompt }];
+    const moderatorAgent = uniqueParticipants[0].agent;
+
+    try {
+      const consensus = await callModelBackend(moderatorAgent, synthesisMessages);
+      sendEvent({ type: "completed", result: consensus, transcript });
+    } catch (err) {
+      sendEvent({ type: "error", message: `Consensus synthesis failed: ${err.message}` });
+    }
+
+    res.end();
+  } catch (err) {
+    console.error("Debate error:", err);
+    sendEvent({ type: "error", message: err.message });
+    res.end();
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  🌐 WEB SEARCH ENGINE — DuckDuckGo, Tavily AI, & SerpAPI
 // ══════════════════════════════════════════════════════════════
 
