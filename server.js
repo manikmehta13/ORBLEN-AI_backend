@@ -45,7 +45,7 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
       body: JSON.stringify({
         model,
         messages,
-        max_tokens: opts.maxTokens || 1500,
+        max_tokens: opts.maxTokens || 16384,
         temperature: opts.temperature ?? 0.7,
         top_p: opts.topP ?? 1.0,
         stream: false
@@ -134,7 +134,7 @@ app.post("/api/mistral", async (req, res) => {
       body: JSON.stringify({
         model: "mistral-large-latest",
         messages,
-        max_tokens: 1500
+        max_tokens: 16384
       })
     });
     const data = await response.json();
@@ -166,7 +166,7 @@ app.post("/api/groq", async (req, res) => {
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages,
-        max_tokens: 1500
+        max_tokens: 16384
       })
     });
     const data = await response.json();
@@ -198,7 +198,7 @@ app.post("/api/cohere", async (req, res) => {
       body: JSON.stringify({
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 1500
+        max_tokens: 16384
       })
     });
     const data = await response.json();
@@ -240,7 +240,7 @@ app.post("/api/deepseek", async (req, res) => {
     return res.status(503).json({ error: "Kimi (NVIDIA NIM) API key not configured on server." });
   }
 
-  await callNvidiaModel("moonshotai/kimi-k2.6", process.env.NVIDIA_KEY_KIMI, messages, res, { maxTokens: 16384, temperature: 1.0 });
+  await callNvidiaModel("moonshotai/kimi-k2.6", process.env.NVIDIA_KEY_KIMI, messages, res, { maxTokens: 65536, temperature: 1.0 });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -544,7 +544,7 @@ async function callNvidiaModelBackend(model, apiKey, messages) {
     body: JSON.stringify({
       model,
       messages,
-      max_tokens: 2000,
+      max_tokens: 16384,
       temperature: 0.7,
       stream: false
     })
@@ -584,7 +584,7 @@ async function callModelBackend(agent, messages) {
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages,
-        max_tokens: 2000
+        max_tokens: 16384
       })
     });
     const data = await response.json();
@@ -623,7 +623,7 @@ async function callModelBackend(agent, messages) {
       body: JSON.stringify({
         model: "mistral-large-latest",
         messages,
-        max_tokens: 2000
+        max_tokens: 16384
       })
     });
     const data = await response.json();
@@ -643,7 +643,7 @@ async function callModelBackend(agent, messages) {
       body: JSON.stringify({
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 2000
+        max_tokens: 16384
       })
     });
     const data = await response.json();
