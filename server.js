@@ -656,98 +656,11 @@ async function callModelBackend(agent, messages) {
   throw new Error("Invalid agent selected.");
 }
 
-// ══════════════════════════════════════════════════════════════
-//  🌐 WEB SEARCH INTELLIGENCE — Multi-Factor Decision Framework
-//
-//  Determines whether a query needs live web data by evaluating
-//  five factors: knowledge currency gap, training data coverage,
-//  answer dynamism, risk of harm, and confidence gap.
-//
-//  Returns true when the total weighted score crosses the threshold,
-//  or when the user explicitly requests a web search.
-//
-//  This is the same framework used by the frontend for normal chat
-//  and debate modes, ensuring consistent behavior everywhere.
-// ══════════════════════════════════════════════════════════════
-
-/**
- * Multi-factor decision framework for internet access (backend version).
- * Accepts arbitrary text (topic + branch name + possibilities combined).
- */
-function needsInternetAccess(text) {
-  const t = text.toLowerCase().trim();
-  const words = t.split(/\s+/);
-  const wordCount = words.length;
-
-  // Explicit web request — always search
-  if (/\b(search(\s+(for|the|up|online|web|internet))?|google\s|look\s*up|browse\s|find\s+(out|online|information|data|details?|the\s+(latest|current|recent))|web\s+search|internet\s+search|check\s+(online|the\s+web|the\s+internet)|lookup)\b/i.test(t)) return true;
-
-  let score = 0;
-
-  // ── FACTOR 1: KNOWLEDGE CURRENCY GAP (0-30) ──
-
-  if (/\b(today|yesterday|tonight|this\s+(week|month|year|quarter|morning|afternoon|evening|decade)|last\s+(night|hour|week|month|year|quarter|decade)|right\s+now|currently|ongoing|as\s+of|at\s+the\s+moment)\b/i.test(t)) score += 18;
-  if (/\b(202[4-9]|20[3-9]\d)\b/.test(t)) score += 20;
-  if (/\b(weather|forecast|temperature|storm|hurricane|earthquake|flood|wildfire)\b/i.test(t)) score += 12;
-  if (/\b(stock\s*(price|market)?|crypto|bitcoin|ethereum|btc|eth|solana|share\s*price|nifty|sensex|index|market\s+cap|trading)\b/i.test(t)) score += 14;
-  if (/\b(news|headlines?|headlined|breaking|trending|current\s+events|latest|update)\b/i.test(t)) score += 12;
-  if (/\b(tomorrow|next\s+(week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(t)) score += 10;
-
-  // ── FACTOR 2: TRAINING DATA COVERAGE (0-25) ──
-
-  const specificityWords = (t.match(/\b(specific|detail|exact|precise|particular|current|latest|recent|upcoming|new|updated|fresh|live|real.time)\b/gi) || []).length;
-  if (specificityWords >= 2) score += 8;
-  if (specificityWords >= 3) score += 5;
-  if (/\b(what('s| is)\s+new|what\s+happened|what('s| is)\s+happening|update\s+(on|about)|status\s+of|developments?\s+in|progress\s+(on|of|in)|latest\s+(on|in|about|news|update|report|study|finding))\b/i.test(t)) score += 15;
-  if (/\b(top\s+\d+|best\s+\w+|worst\s+\w+|highest\s+|lowest\s+|leading\s+|most\s+(popular|valuable|influential|powerful|expensive|anticipated))\b/i.test(t)) score += 10;
-  if (wordCount >= 12 && /\b(company|organization|startup|product|service|platform|framework|library|tool|software|app|device|technology)\b/i.test(t)) score += 8;
-  if (/\b(how\s+many|how\s+much|statistics?|data\s+(on|about|for|shows)|figures?|numbers?|percentage|rate\s+of|ratio|total|population|GDP|revenue|profit|loss|growth|decline|increase|decrease|survey|poll)\b/i.test(t)) score += 10;
-
-  // ── FACTOR 3: ANSWER DYNAMISM (0-20) ──
-
-  if (/\b(price|pricing|cost|rate|fees|salary|valuation|worth|budget|funding|investment|revenue|profit|quarterly)\b/i.test(t)) score += 8;
-  if (/\b(version|release|update|launch|announce|beta|alpha|patch|rollout|deprecat)\b/i.test(t)) score += 8;
-  if (/\b(election|poll|vote|approval.rating|candidate|campaign|legislation|bill|policy|regulation|ruling|judgment)\b/i.test(t)) score += 8;
-  const dynamicEntityCount = (t.match(/\b(AI|artificial\s+intelligence|GPT|ChatGPT|LLM|machine\s+learning|deep\s+learning|Apple|Google|Microsoft|Meta|Amazon|Tesla|SpaceX|OpenAI|Anthropic|NVIDIA|AMD|Intel|Samsung|Twitter|X\.com|Netflix|Uber|Airbnb|Spotify|Zoom|Slack|Notion|Figma|Vercel|Netlify|Adobe|Oracle|IBM|Salesforce|Palantir|ByteDance|Tencent|Alibaba|Sony|IPO|acquisition|merger|lawsuit|antitrust)\b/gi) || []).length;
-  if (dynamicEntityCount >= 1) score += 6;
-  if (dynamicEntityCount >= 2) score += 4;
-  if (/\b(versus|vs\.?|compare|comparison|difference\s+between|better\s+than|worse\s+than|how\s+does\s+\w+\s+compare|which\s+is\s+(better|worse|faster|cheaper|more))\b/i.test(t)) score += 6;
-
-  // ── FACTOR 4: RISK OF HARM (0-15) ──
-
-  if (/\b(medical|health|treatment|therapy|medication|dosage|symptom|disease|diagnosis|prognosis|surgery|drug|vaccine|clinical|patient|hospital)\b/i.test(t)) score += 15;
-  if (/\b(legal|law|lawsuit|statute|regulation|compliance|attorney|lawyer|court|judge|ruling|precedent|contract|liability)\b/i.test(t)) score += 12;
-  if (/\b(financial\s+advice|investment|retirement|mortgage|loan|interest\s+rate|credit\s+score|tax|insurance|portfolio|trading)\b/i.test(t)) score += 10;
-  if (/\b(safety|security|emergency|disaster|evacuation|warning|alert|recall|hazard|toxic|poison)\b/i.test(t)) score += 12;
-  if (/\b(accurate|correct|reliable|up.to.date|up\s+to\s+date|current|verify|confirm|fact.?check|true|real|actual|ensure|make\s+sure|double.check)\b/i.test(t)) score += 8;
-
-  // ── FACTOR 5: CONFIDENCE GAP (0-10) ──
-
-  if (/\b(what\s+(is|are|was|were)\s+(the|a|an)\s+\w+\s+(of|in|for)\s+\w+|how\s+(many|much|large|long|far|old|tall|wide|deep|fast|often)\s+is|when\s+(did|was|were|will|does)\s+\w+|where\s+(is|are|was|were|did|does)\s+\w+)\b/i.test(t)) score += 6;
-  if (/\b(\d{4}|\d+%\s|\$\d+|€\d+|£\d+|INR\s+\d+|\d+\s+(million|billion|trillion|thousand|hundred)|born\s+in|founded\s+in|launched\s+in|released\s+in)\b/i.test(t)) score += 5;
-  if (/\b(explain|define|what\s+is\s+(a|an|the)\s+\w+\s*$|describe|overview|introduction|meaning\s+of|definition\s+of|concept\s+of|theory\s+of|history\s+of|origins?\s+of)\b/i.test(t)) score -= 8;
-  if (/\b(think|believe|opinion|thoughts?\s+on|your\s+(take|perspective|view)|what\s+do\s+you\s+(think|know)\s+about|how\s+do\s+you\s+(feel|view)|in\s+your\s+opinion)\b/i.test(t)) score -= 6;
-
-  // ── PENALTIES: Stable / timeless topics ──
-
-  if (/\b(ancient|classical|medieval|historical|century|b\.c\.|a\.d\.|prehistoric|origin\s+of|etymology|definition|meaning\s+of|derived\s+from|roots?\s+in)\b/i.test(t)) score -= 15;
-  if (/\b(mathematical|theorem|proof|formula|equation|scientific\s+(law|principle|theory|method)|physics|chemistry|biology|photosynthesis|gravity|evolution|atom|molecule|cell|DNA)\b/i.test(t)) score -= 12;
-  if (/\b(philosophy|philosophical|metaphysics|ethics|morality|existential|consciousness|free\s+will)\b/i.test(t)) score -= 10;
-  if (/\b(grammar|syntax|vocabulary|translat\w+|synonym|antonym|spelling|pronunciation|language)\b/i.test(t)) score -= 5;
-  if (wordCount <= 4 && !t.includes('?')) {
-    const hasStrongSignal = /\b(today|yesterday|tonight|latest|update|news|weather|stock|price|crypto|election)\b/i.test(t);
-    if (!hasStrongSignal) score -= 10;
-  }
-
-  // ── COMBINED SIGNAL BONUS: temporal + dynamic-interest overlap ──
-  const hasTemporalSignal = /\b(today|yesterday|tonight|tomorrow|this\s+(week|month|year|quarter)|last\s+(night|week|month|year)|next\s+(week|month|year)|in\s+20\d{2}|currently|ongoing|recent|latest|upcoming|new)\b/i.test(t);
-  const hasDynamicInterest = /\b(news|headlines?|headlined|weather|stock|price|market|crypto|election|score|match|result|winner|version|release|launch|update|trending|breaking)\b/i.test(t);
-  if (hasTemporalSignal && hasDynamicInterest) {
-    score += 15;
-  }
-
-  return score >= 55;
-}
+// ─────────────────────────────────────────────────────────────
+//  In deep research mode every branch always attempts web
+//  search; fetchWebContextForBranch() handles failures gracefully
+//  by returning null when no data is available.
+// ─────────────────────────────────────────────────────────────
 
 /**
  * Builds a concise, targeted search query from the topic and branch context.
@@ -831,10 +744,11 @@ function formatWebContextForPrompt(webContext) {
 
   block += "━━━━━━━━━━━━━━━━━━━\n";
   block += "INSTRUCTIONS:\n";
-  block += "• Use the web data above to ground your answer in current, factual information.\n";
-  block += "• Cite sources by number, e.g. [1], when referencing specific results.\n";
-  block += "• If web data conflicts with your training knowledge, defer to the web data since it is more current.\n";
-  block += "• If the results do not contain enough information, state what is known and what is uncertain.\n";
+  block += "• SYNTHESIZE both your training knowledge AND the web data above to produce the best answer.\n";
+  block += "• Use real-time numbers, figures, and facts from the web to make your response accurate and current.\n";
+  block += "• Use your training knowledge to provide context, historical trends across years, and deeper understanding.\n";
+  block += "• Cite web sources by number, e.g. [1]. When combining both sources, note what comes from web vs training.\n";
+  block += "• If web data conflicts with your training knowledge, defer to the web data (it is more current).\n";
   block += "• Dates are shown where available — prefer more recent sources for time-sensitive topics.\n";
 
   return block;
@@ -1063,9 +977,7 @@ app.post("/api/deep-research", async (req, res) => {
     // ── Decide which branches need web search before launching parallel work ──
     const branchSearchDecisions = {};
     plan.branches.forEach(branch => {
-      const combinedText = plan.topic + " " + branch.name + " " + (branch.possibilities || []).join(" ");
-      const needsSearch = needsInternetAccess(combinedText);
-      branchSearchDecisions[branch.name] = needsSearch;
+      branchSearchDecisions[branch.name] = true;
     });
 
     const searchCount = Object.values(branchSearchDecisions).filter(Boolean).length;
@@ -1154,10 +1066,7 @@ app.post("/api/deep-research", async (req, res) => {
     sendEvent({ type: "status", message: "Synthesizing branch findings..." });
 
     let synthesisWebContext = null;
-    // Only do a synthesis-level search if the topic itself strongly signals recency
-    const synthText = plan.topic + " synthesis overview key trends current state recent developments";
-    const topicNeedsSearch = needsInternetAccess(synthText);
-    if (topicNeedsSearch && (process.env.TAVILY_API_KEY || true)) {
+    if (true) {
       sendEvent({ type: "synthesis_search_start", query: plan.topic });
       try {
         synthesisWebContext = await fetchWebContextForBranch(
