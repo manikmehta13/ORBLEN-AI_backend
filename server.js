@@ -690,7 +690,7 @@ function needsInternetAccess(text) {
   if (/\b(202[4-9]|20[3-9]\d)\b/.test(t)) score += 20;
   if (/\b(weather|forecast|temperature|storm|hurricane|earthquake|flood|wildfire)\b/i.test(t)) score += 12;
   if (/\b(stock\s*(price|market)?|crypto|bitcoin|ethereum|btc|eth|solana|share\s*price|nifty|sensex|index|market\s+cap|trading)\b/i.test(t)) score += 14;
-  if (/\b(news|headlines?|headlined|breaking|trending|current\s+events|latest)\b/i.test(t)) score += 12;
+  if (/\b(news|headlines?|headlined|breaking|trending|current\s+events|latest|update)\b/i.test(t)) score += 12;
   if (/\b(tomorrow|next\s+(week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(t)) score += 10;
 
   // ── FACTOR 2: TRAINING DATA COVERAGE (0-25) ──
@@ -708,7 +708,7 @@ function needsInternetAccess(text) {
   if (/\b(price|pricing|cost|rate|fees|salary|valuation|worth|budget|funding|investment|revenue|profit|quarterly)\b/i.test(t)) score += 8;
   if (/\b(version|release|update|launch|announce|beta|alpha|patch|rollout|deprecat)\b/i.test(t)) score += 8;
   if (/\b(election|poll|vote|approval.rating|candidate|campaign|legislation|bill|policy|regulation|ruling|judgment)\b/i.test(t)) score += 8;
-  const dynamicEntityCount = (t.match(/\b(Apple|Google|Microsoft|Meta|Amazon|Tesla|SpaceX|OpenAI|Anthropic|NVIDIA|AMD|Intel|Samsung|Twitter|X\.com|Netflix|Uber|Airbnb|Spotify|Zoom|Slack|Notion|Figma|Vercel|Netlify|Adobe|Oracle|IBM|Salesforce|Palantir|ByteDance|Tencent|Alibaba|Sony|IPO|acquisition|merger|lawsuit|antitrust)\b/gi) || []).length;
+  const dynamicEntityCount = (t.match(/\b(AI|artificial\s+intelligence|GPT|ChatGPT|LLM|machine\s+learning|deep\s+learning|Apple|Google|Microsoft|Meta|Amazon|Tesla|SpaceX|OpenAI|Anthropic|NVIDIA|AMD|Intel|Samsung|Twitter|X\.com|Netflix|Uber|Airbnb|Spotify|Zoom|Slack|Notion|Figma|Vercel|Netlify|Adobe|Oracle|IBM|Salesforce|Palantir|ByteDance|Tencent|Alibaba|Sony|IPO|acquisition|merger|lawsuit|antitrust)\b/gi) || []).length;
   if (dynamicEntityCount >= 1) score += 6;
   if (dynamicEntityCount >= 2) score += 4;
   if (/\b(versus|vs\.?|compare|comparison|difference\s+between|better\s+than|worse\s+than|how\s+does\s+\w+\s+compare|which\s+is\s+(better|worse|faster|cheaper|more))\b/i.test(t)) score += 6;
@@ -734,7 +734,10 @@ function needsInternetAccess(text) {
   if (/\b(mathematical|theorem|proof|formula|equation|scientific\s+(law|principle|theory|method)|physics|chemistry|biology|photosynthesis|gravity|evolution|atom|molecule|cell|DNA)\b/i.test(t)) score -= 12;
   if (/\b(philosophy|philosophical|metaphysics|ethics|morality|existential|consciousness|free\s+will)\b/i.test(t)) score -= 10;
   if (/\b(grammar|syntax|vocabulary|translat\w+|synonym|antonym|spelling|pronunciation|language)\b/i.test(t)) score -= 5;
-  if (wordCount <= 4 && !t.includes('?')) score -= 10;
+  if (wordCount <= 4 && !t.includes('?')) {
+    const hasStrongSignal = /\b(today|yesterday|tonight|latest|update|news|weather|stock|price|crypto|election)\b/i.test(t);
+    if (!hasStrongSignal) score -= 10;
+  }
 
   // ── COMBINED SIGNAL BONUS: temporal + dynamic-interest overlap ──
   const hasTemporalSignal = /\b(today|yesterday|tonight|tomorrow|this\s+(week|month|year|quarter)|last\s+(night|week|month|year)|next\s+(week|month|year)|in\s+20\d{2}|currently|ongoing|recent|latest|upcoming|new)\b/i.test(t);
