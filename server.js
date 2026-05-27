@@ -598,8 +598,8 @@ async function callModelBackend(agent, messages) {
   }
 
   if (agent === "deepseek") {
-    if (!process.env.NVIDIA_KEY_DEEPSEEK) throw new Error("DeepSeek key not configured.");
-    return await callNvidiaModelBackend("deepseek-ai/deepseek-v4-pro", process.env.NVIDIA_KEY_DEEPSEEK, messages);
+    if (!process.env.NVIDIA_KEY_KIMI) throw new Error("Kimi (NVIDIA NIM) key not configured for DeepSeek agent.");
+    return await callNvidiaModelBackend("moonshotai/kimi-k2.6", process.env.NVIDIA_KEY_KIMI, messages);
   }
 
   if (agent === "gemma4") {
@@ -2238,7 +2238,7 @@ app.listen(PORT, () => {
   console.log(`   Keys loaded: ${[
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
-    process.env.NVIDIA_KEY_DEEPSEEK ? "✅ DeepSeek v4 Pro" : "❌ DeepSeek v4 Pro",
+    process.env.NVIDIA_KEY_KIMI    ? "✅ Kimi K2.6"     : "❌ Kimi K2.6",
     process.env.NVIDIA_KEY_GEMMA4  ? "✅ Gemma 4 31B IT" : "❌ Gemma 4 31B IT",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
