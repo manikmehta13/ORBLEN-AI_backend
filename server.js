@@ -690,7 +690,7 @@ function needsInternetAccess(text) {
   if (/\b(202[4-9]|20[3-9]\d)\b/.test(t)) score += 20;
   if (/\b(weather|forecast|temperature|storm|hurricane|earthquake|flood|wildfire)\b/i.test(t)) score += 12;
   if (/\b(stock\s*(price|market)?|crypto|bitcoin|ethereum|btc|eth|solana|share\s*price|nifty|sensex|index|market\s+cap|trading)\b/i.test(t)) score += 14;
-  if (/\b(news|headline|breaking|trending|current\s+events|latest)\b/i.test(t)) score += 12;
+  if (/\b(news|headlines?|headlined|breaking|trending|current\s+events|latest)\b/i.test(t)) score += 12;
   if (/\b(tomorrow|next\s+(week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(t)) score += 10;
 
   // ── FACTOR 2: TRAINING DATA COVERAGE (0-25) ──
@@ -699,6 +699,7 @@ function needsInternetAccess(text) {
   if (specificityWords >= 2) score += 8;
   if (specificityWords >= 3) score += 5;
   if (/\b(what('s| is)\s+new|what\s+happened|what('s| is)\s+happening|update\s+(on|about)|status\s+of|developments?\s+in|progress\s+(on|of|in)|latest\s+(on|in|about|news|update|report|study|finding))\b/i.test(t)) score += 15;
+  if (/\b(top\s+\d+|best\s+\w+|worst\s+\w+|highest\s+|lowest\s+|leading\s+|most\s+(popular|valuable|influential|powerful|expensive|anticipated))\b/i.test(t)) score += 10;
   if (wordCount >= 12 && /\b(company|organization|startup|product|service|platform|framework|library|tool|software|app|device|technology)\b/i.test(t)) score += 8;
   if (/\b(how\s+many|how\s+much|statistics?|data\s+(on|about|for|shows)|figures?|numbers?|percentage|rate\s+of|ratio|total|population|GDP|revenue|profit|loss|growth|decline|increase|decrease|survey|poll)\b/i.test(t)) score += 10;
 
@@ -734,6 +735,13 @@ function needsInternetAccess(text) {
   if (/\b(philosophy|philosophical|metaphysics|ethics|morality|existential|consciousness|free\s+will)\b/i.test(t)) score -= 10;
   if (/\b(grammar|syntax|vocabulary|translat\w+|synonym|antonym|spelling|pronunciation|language)\b/i.test(t)) score -= 5;
   if (wordCount <= 4 && !t.includes('?')) score -= 10;
+
+  // ── COMBINED SIGNAL BONUS: temporal + dynamic-interest overlap ──
+  const hasTemporalSignal = /\b(today|yesterday|tonight|tomorrow|this\s+(week|month|year|quarter)|last\s+(night|week|month|year)|next\s+(week|month|year)|in\s+20\d{2}|currently|ongoing|recent|latest|upcoming|new)\b/i.test(t);
+  const hasDynamicInterest = /\b(news|headlines?|headlined|weather|stock|price|market|crypto|election|score|match|result|winner|version|release|launch|update|trending|breaking)\b/i.test(t);
+  if (hasTemporalSignal && hasDynamicInterest) {
+    score += 15;
+  }
 
   return score >= 55;
 }
