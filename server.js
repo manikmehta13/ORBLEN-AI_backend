@@ -1256,6 +1256,10 @@ app.post("/api/debate", async (req, res) => {
           ? transcript.map(t => `${t.name} (${t.persona.role}):\n${t.content}`).join("\n\n---\n\n")
           : "";
 
+        const webDataSection = webSection
+          ? `\nUse the following current web data to support your arguments where applicable:\n${webSection}`
+          : "";
+
         let debatePrompt;
         if (round === 1 && pIdx === 0) {
           debatePrompt = `You are participating in a structured multi-AI debate.
@@ -1269,9 +1273,7 @@ This is the opening statement of the debate. Present your initial position on th
 • Your main thesis/position on the topic
 • Key supporting arguments and reasoning
 • Evidence or examples where relevant
-
-Use the following current web data to support your arguments where applicable:
-${webSection}
+${webDataSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         } else {
           debatePrompt = `You are participating in a structured multi-AI debate.
@@ -1292,9 +1294,7 @@ Now it's your turn. Respond to the previous speakers. You should:
 • Advance your own unique perspective based on your assigned role
 • Ask thoughtful questions to probe weaknesses in opposing arguments
 • Counter any arguments made against your position
-
-Use the following current web data to support your arguments where applicable:
-${webSection}
+${webDataSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         }
 
@@ -1348,6 +1348,10 @@ Keep your response focused and concise (2-4 paragraphs). Use proper punctuation 
       `--- ${t.name} (${t.persona.role}) - Round ${t.round} ---\n${t.content}`
     ).join("\n\n");
 
+    const webSynthesisSection = webSection
+      ? `\nThe following current web data was available to participants during the debate and should inform your synthesis:\n${webSection}`
+      : "";
+
     const synthesisPrompt = `You are a neutral debate moderator and expert synthesis analyst.
 
 DEBATE TOPIC: "${topic}"
@@ -1355,10 +1359,7 @@ DEBATE TOPIC: "${topic}"
 Below is the full transcript of a structured multi-AI debate between participants with different assigned perspectives:
 
 ${fullTranscript}
-
-The following current web data was available to participants during the debate and should inform your synthesis:
-
-${webSection}
+${webSynthesisSection}
 Your task: synthesize this debate into a clear, balanced, and actionable final document. Structure your response with these sections:
 
 ## 📋 Executive Summary
