@@ -770,26 +770,35 @@ async function fetchWebContextForBranch(topic, branch) {
 function formatWebContextForPrompt(webContext) {
   if (!webContext || !webContext.results || webContext.results.length === 0) return "";
 
+  const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   let block = "\n\n---\n";
-  block += `🌐 LIVE WEB RESEARCH DATA (Source: ${webContext.service} | Query: "${webContext.query}")\n`;
-  block += "Use the following real-world, up-to-date information to ground your analysis in current facts:\n\n";
+  block += `🌐 LIVE WEB SEARCH RESULTS\n`;
+  block += `Query: "${webContext.query}"\n`;
+  block += `Retrieved: ${today} | Source: ${webContext.service}\n`;
 
   if (webContext.answer) {
-    block += `📋 Web Summary: ${webContext.answer}\n\n`;
+    block += `\n📋 AI Summary: ${webContext.answer}\n`;
   }
 
+  block += `\n━━━ Results ━━━\n\n`;
+
   webContext.results.forEach((r, i) => {
-    block += `[${i + 1}] ${r.title || "Result"}\n`;
-    const snippet = (r.snippet || r.content || r.text || "").slice(0, 250);
-    if (snippet) block += `    ${snippet}\n`;
-    if (r.url) block += `    🔗 ${r.url}\n`;
+    block += `[${i + 1}] ${r.title || "Untitled"}`;
+    if (r.date) block += ` (${r.date})`;
+    block += "\n";
+    const snippet = (r.snippet || r.content || r.text || "").slice(0, 350);
+    if (snippet) block += `   ${snippet}\n`;
+    if (r.url) block += `   🔗 ${r.url}\n`;
     block += "\n";
   });
 
-  block += "---\n";
-  block += "IMPORTANT: Integrate the above web data naturally into your step-by-step reasoning. ";
-  block += "Cite specific facts or findings where they strengthen the analysis. ";
-  block += "If the web data conflicts with your training knowledge, note the discrepancy.\n";
+  block += "━━━━━━━━━━━━━━━━━━━\n";
+  block += "INSTRUCTIONS:\n";
+  block += "• Use the web data above to ground your answer in current, factual information.\n";
+  block += "• Cite sources by number, e.g. [1], when referencing specific results.\n";
+  block += "• If web data conflicts with your training knowledge, defer to the web data since it is more current.\n";
+  block += "• If the results do not contain enough information, state what is known and what is uncertain.\n";
+  block += "• Dates are shown where available — prefer more recent sources for time-sensitive topics.\n";
 
   return block;
 }
@@ -1159,12 +1168,13 @@ const DEBATE_PERSONAS = [
 ];
 
 app.post("/api/debate", async (req, res) => {
-  const { topic, agents, rounds } = req.body;
+  const { topic, agents, rounds, webContext } = req.body;
   if (!topic) return res.status(400).json({ error: "topic required" });
   if (!agents || !Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
 
   const maxRounds = Math.min(Math.max(parseInt(rounds) || 2, 1), 4);
   const selectedAgents = agents.slice(0, 5);
+  const webSection = webContext ? formatWebContextForPrompt(webContext) : "";
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1260,6 +1270,8 @@ This is the opening statement of the debate. Present your initial position on th
 • Key supporting arguments and reasoning
 • Evidence or examples where relevant
 
+Use the following current web data to support your arguments where applicable:
+${webSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         } else {
           debatePrompt = `You are participating in a structured multi-AI debate.
@@ -1281,6 +1293,8 @@ Now it's your turn. Respond to the previous speakers. You should:
 • Ask thoughtful questions to probe weaknesses in opposing arguments
 • Counter any arguments made against your position
 
+Use the following current web data to support your arguments where applicable:
+${webSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         }
 
@@ -1342,6 +1356,9 @@ Below is the full transcript of a structured multi-AI debate between participant
 
 ${fullTranscript}
 
+The following current web data was available to participants during the debate and should inform your synthesis:
+
+${webSection}
 Your task: synthesize this debate into a clear, balanced, and actionable final document. Structure your response with these sections:
 
 ## 📋 Executive Summary
@@ -1381,12 +1398,39 @@ Keep your synthesis thorough but readable. Use proper punctuation throughout.`;
 // ══════════════════════════════════════════════════════════════
 
 // ─────────────────────────────────────────────────────────────
+//  Helper: fetch with timeout
+// ─────────────────────────────────────────────────────────────
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: Clean search query for better results
+// ─────────────────────────────────────────────────────────────
+function cleanSearchQuery(query) {
+  return query
+    .replace(/\b(hey|hello|hi|tell me about|can you|would you|could you|please|thanks|thank you)\b/gi, '')
+    .replace(/[?¿!¡]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Helper: DuckDuckGo Search (Organic Scraper - FREE)
 // ─────────────────────────────────────────────────────────────
 async function handleDuckDuckGoSearch(query) {
   try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
+    const cleaned = cleanSearchQuery(query) || query;
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleaned)}`;
+    const response = await fetchWithTimeout(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       }
@@ -1403,7 +1447,7 @@ async function handleDuckDuckGoSearch(query) {
     for (let i = 1; i < resultBlocks.length; i++) {
       const block = resultBlocks[i];
       const titleMatch = block.match(/class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-      const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+      let snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
       
       if (titleMatch) {
         let urlLink = titleMatch[1];
@@ -1421,12 +1465,16 @@ async function handleDuckDuckGoSearch(query) {
         }
         
         const cleanTitle = titleMatch[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-        const cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
+        let cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim() : '';
+        
+        // Try to extract a date if present in the snippet
+        const dateMatch = cleanSnippet.match(/(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})/i);
         
         results.push({
           title: cleanTitle,
           url: urlLink,
           snippet: cleanSnippet,
+          date: dateMatch ? dateMatch[1] : null,
           source: "DuckDuckGo"
         });
       }
@@ -1444,12 +1492,13 @@ async function handleDuckDuckGoSearch(query) {
 // ─────────────────────────────────────────────────────────────
 async function handleTavilySearch(query) {
   try {
-    const response = await fetch("https://api.tavily.com/search", {
+    const cleaned = cleanSearchQuery(query) || query;
+    const response = await fetchWithTimeout("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         api_key: process.env.TAVILY_API_KEY,
-        query: query,
+        query: cleaned,
         topic: "general",
         max_results: 8,
         include_answer: true
@@ -1483,14 +1532,15 @@ async function handleTavilySearch(query) {
 // ─────────────────────────────────────────────────────────────
 async function handleSerpAPISearch(query) {
   try {
+    const cleaned = cleanSearchQuery(query) || query;
     const params = new URLSearchParams({
-      q: query,
+      q: cleaned,
       api_key: process.env.SERPAPI_KEY,
       engine: "google",
       num: 8
     });
 
-    const response = await fetch(`https://serpapi.com/search?${params}`);
+    const response = await fetchWithTimeout(`https://serpapi.com/search?${params}`);
     const data = await response.json();
 
     if (data.error) {
