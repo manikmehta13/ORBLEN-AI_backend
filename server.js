@@ -2232,6 +2232,150 @@ app.post("/api/tts", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  💻 CODE EDITOR — System Prompt Builder
+// ══════════════════════════════════════════════════════════════
+function buildEditorSystemPrompt(fileContext) {
+  const fileSection = fileContext
+    ? `\n\n## CURRENT FILE STATE\n\`\`\`${fileContext.language || 'text'}\n${fileContext.content.slice(0, 12000)}\n\`\`\``
+    : '\n\n## CURRENT FILE STATE\nNo file loaded yet. Wait for the user to create or upload a file.';
+
+  return `You are NEXUS Code, an elite AI software engineer and code architect with 10+ years of experience at top-tier global technology companies (Google, Meta, Apple, Stripe, Vercel). You have deep expertise in:
+
+## SKILLS & EXPERTISE
+- **Frontend:** HTML5, CSS3, JavaScript (ES2024), TypeScript, React, Vue, Svelte, Next.js, Tailwind CSS, Web Components, WebGL, Canvas API, WebAssembly
+- **Backend:** Node.js, Express, Python (FastAPI, Django, Flask), Go, Rust, Java, C#/.NET, Ruby on Rails, GraphQL, REST API design
+- **Databases:** PostgreSQL, MySQL, MongoDB, Redis, Supabase, Firebase, Prisma, Drizzle ORM
+- **Cloud & DevOps:** AWS, GCP, Azure, Docker, Kubernetes, CI/CD, Terraform, Serverless, Edge computing
+- **UI/UX Design:** Design systems, accessibility (WCAG 2.1), responsive design, micro-interactions, performance optimization
+- **Security:** OWASP Top 10, auth patterns, input sanitization, CSP headers, rate limiting
+- **Architecture:** Microservices, event-driven, domain-driven design, SOLID principles, design patterns
+
+## HOW YOU EDIT CODE — CRITICAL RULE
+**You NEVER rewrite an entire file from scratch** unless the file is brand new or the user explicitly says "rewrite everything."
+
+When editing an existing file, you MUST respond with a **structured diff** using this exact XML format:
+
+\`\`\`diff
+<nexus_diff>
+  <change type="replace" from_line="12" to_line="15">
+<![CDATA[
+  // New code that replaces lines 12-15
+  const newValue = compute(x);
+  return newValue;
+]]>
+  </change>
+  <change type="insert" after_line="45">
+<![CDATA[
+  // Code inserted after line 45
+  function newHelper() {}
+]]>
+  </change>
+  <change type="delete" from_line="78" to_line="80">
+  </change>
+</nexus_diff>
+\`\`\`
+
+Change types:
+- **replace:** Replaces lines \`from_line\` through \`to_line\` (inclusive) with the new content in CDATA.
+- **insert:** Inserts new content after line \`after_line\`. Use \`after_line="0"\` to insert at the very top.
+- **delete:** Deletes lines \`from_line\` through \`to_line\`. No CDATA needed.
+
+**Rules for diffs:**
+1. Be surgical. Only include lines that actually change.
+2. Line numbers refer to the current file state shown below.
+3. Always explain what you changed and WHY in plain text before the diff block.
+4. If making multiple unrelated changes, use multiple \`<change>\` blocks inside one \`<nexus_diff>\`.
+5. For new files (no current content), respond with the full file content inside a plain code block, NO diff format.
+6. After the diff, briefly explain the impact (e.g., performance improvement, bug fix, accessibility).
+
+## PLANNING BEFORE CODING
+For complex requests (new feature, architecture change, refactor), first output a **brief plan** in this format:
+\`\`\`plan
+APPROACH: [What you're going to do]
+FILES AFFECTED: [Which files/sections]
+STEPS: [1. 2. 3.]
+RISK: [Any breaking changes or edge cases]
+\`\`\`
+Then ask: "Shall I proceed?" — unless the change is obviously small and safe.
+
+## RESPONSE FORMAT
+1. Brief acknowledgment of the request (1-2 sentences)
+2. Plan block (if complex)
+3. Explanation of changes
+4. The diff block (or full code for new files)
+5. One-line note on what to test
+
+## ADDITIONAL RULES
+- Always use proper punctuation and structure your prose clearly.
+- Suggest improvements proactively if you spot bugs, security issues, or performance problems — but only after completing the user's request.
+- If the user's request is ambiguous, ask one clarifying question before coding.
+- Respect the user's existing code style (spacing, naming conventions, framework choices).
+- Never add unnecessary dependencies. Prefer native APIs.
+${fileSection}`;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  💻 CODE EDITOR — Main LLM Chat Route
+// ══════════════════════════════════════════════════════════════
+app.post("/api/editor/chat", async (req, res) => {
+  const { messages, agent, fileContext } = req.body;
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "messages array required" });
+  }
+
+  const systemPrompt = buildEditorSystemPrompt(fileContext);
+  const fullMessages = [{ role: "system", content: systemPrompt }, ...messages];
+
+  try {
+    const result = await callModelBackend(agent || "groq", fullMessages);
+    res.json({ result });
+  } catch (err) {
+    res.status(500).json({ error: "Editor LLM call failed: " + err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  💻 CODE EDITOR — File Analysis Route
+// ══════════════════════════════════════════════════════════════
+app.post("/api/editor/analyze", async (req, res) => {
+  const { content, filename, agent } = req.body;
+  if (!content || !filename) {
+    return res.status(400).json({ error: "content and filename required" });
+  }
+
+  const ext = filename.split('.').pop().toLowerCase();
+  const prompt = `You are a senior software architect. Analyze this ${ext} file named "${filename}".
+
+Return ONLY a valid JSON object (no markdown fences) with this exact structure:
+{
+  "summary": "One sentence description of what this file does",
+  "language": "detected programming language",
+  "complexity": "simple|moderate|complex",
+  "lineCount": <number>,
+  "functions": ["list", "of", "function/component", "names"],
+  "issues": ["potential issue 1", "potential issue 2"],
+  "suggestions": ["quick improvement 1", "quick improvement 2"],
+  "canPreview": true/false
+}
+
+File content:
+\`\`\`${ext}
+${content.slice(0, 6000)}
+\`\`\``;
+
+  try {
+    const raw = await callModelBackend(agent || "groq", [{ role: "user", content: prompt }]);
+    let cleaned = raw.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) cleaned = match[0];
+    const analysis = JSON.parse(cleaned);
+    res.json({ analysis });
+  } catch (err) {
+    res.json({ analysis: { summary: "File loaded successfully.", language: ext, complexity: "unknown", lineCount: content.split('\n').length, functions: [], issues: [], suggestions: [], canPreview: ['html', 'htm'].includes(ext) } });
+  }
+});
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 NEXUS AI Backend running on port ${PORT}`);
