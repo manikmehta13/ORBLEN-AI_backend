@@ -7,6 +7,13 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const { Readable } = require("stream");
+const {
+  SKILL_REPOSITORY,
+  SKILL_SOURCES,
+  selectSkills,
+  buildSkillContext,
+  publicSkill
+} = require("./skillRepository");
 
 const app = express();
 
@@ -20,6 +27,91 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '15mb' }));
+
+// Skill repository: curated coding capabilities the frontend can browse and
+// the chat flow can inject into model prompts on demand.
+app.get("/api/skills", (req, res) => {
+  res.json({
+    success: true,
+    updatedAt: "2026-05-28",
+    sources: SKILL_SOURCES,
+    skills: SKILL_REPOSITORY.map(publicSkill)
+  });
+});
+
+app.post("/api/skills/select", (req, res) => {
+  const { query, limit = 4 } = req.body || {};
+  if (!query) return res.status(400).json({ error: "query required" });
+
+  const selected = selectSkills(query, { limit }).map(skill => ({
+    ...publicSkill(skill),
+    score: Number(skill.score.toFixed(2))
+  }));
+
+  res.json({
+    success: true,
+    query,
+    selected,
+    context: buildSkillContext(selected),
+    sources: SKILL_SOURCES
+  });
+});
+
+app.post("/api/skills/refresh", async (req, res) => {
+  const { query } = req.body || {};
+  const trendQuery = query || "software development skills trends TypeScript React Python AI cloud native Docker Kubernetes 2026";
+
+  try {
+    let results = [];
+    let service = "duckduckgo";
+
+    if (process.env.TAVILY_API_KEY) {
+      const tavily = await handleTavilySearch(trendQuery);
+      if (tavily?.results?.length) {
+        results = tavily.results;
+        service = "tavily";
+      }
+    }
+
+    if (!results.length) {
+      results = await handleDuckDuckGoSearch(trendQuery);
+    }
+
+    const scanText = results
+      .map(result => `${result.title || ""} ${result.snippet || result.content || ""}`)
+      .join(" ")
+      .toLowerCase();
+
+    const matches = SKILL_REPOSITORY
+      .map(skill => {
+        const terms = [...(skill.tags || []), ...(skill.aliases || []), skill.name]
+          .map(term => String(term).toLowerCase())
+          .filter(Boolean);
+        const hits = terms.filter(term => scanText.includes(term)).slice(0, 8);
+        return {
+          id: skill.id,
+          name: skill.name,
+          category: skill.category,
+          horizon: skill.horizon,
+          demand: skill.demand,
+          trendHits: hits
+        };
+      })
+      .filter(skill => skill.trendHits.length)
+      .sort((a, b) => b.trendHits.length - a.trendHits.length);
+
+    res.json({
+      success: true,
+      refreshedAt: new Date().toISOString(),
+      query: trendQuery,
+      service,
+      sources: results.slice(0, 8),
+      matches
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Skill refresh failed: " + err.message });
+  }
+});
 
 // ── Health check ──
 app.get("/", (req, res) => {
