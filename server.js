@@ -643,9 +643,13 @@ async function callNvidiaModelBackend(model, apiKey, messages) {
 async function callModelBackend(agent, messages) {
   if (agent === "gemini") {
     if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+    const sysMsg = messages.find(m => m.role === "system");
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg?.content) throw new Error("No message content for Gemini");
-    const prompt = lastMsg.content;
+    let prompt = lastMsg.content;
+    if (sysMsg?.content) {
+      prompt = `[System Instruction]\n${sysMsg.content}\n\n[User Message]\n${prompt}`;
+    }
     const gc = new AbortController();
     const gt = setTimeout(() => gc.abort(), 30000);
     try {
@@ -758,9 +762,15 @@ async function callModelBackend(agent, messages) {
 
   if (agent === "cohere") {
     if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
+    const sysMsg = messages.find(m => m.role === "system");
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg?.content) throw new Error("No message content for Cohere");
-    const prompt = lastMsg.content;
+    let prompt = lastMsg.content;
+    const cohereMessages = [];
+    if (sysMsg?.content) {
+      cohereMessages.push({ role: "system", content: sysMsg.content });
+    }
+    cohereMessages.push({ role: "user", content: prompt });
     const cc = new AbortController();
     const ct = setTimeout(() => cc.abort(), 30000);
     try {
@@ -772,7 +782,7 @@ async function callModelBackend(agent, messages) {
         },
         body: JSON.stringify({
           model: "command-r-plus-08-2024",
-          messages: [{ role: "user", content: prompt }],
+          messages: cohereMessages,
           max_tokens: 4096
         }),
         signal: cc.signal
@@ -1083,10 +1093,15 @@ app.post("/api/deep-research", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   if (typeof res.flushHeaders === "function") res.flushHeaders();
+  if (res.socket) res.socket.setNoDelay(true);
 
   const sendEvent = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    const raw = `data: ${JSON.stringify(data)}\n\n`;
+    res.write(raw);
+    // Node 18+ uses write(... , callback) — force flush via drain semantics
+    if (typeof res.flush === "function") res.flush();
   };
 
   const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
@@ -1270,13 +1285,20 @@ app.post("/api/debate", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   if (typeof res.flushHeaders === "function") res.flushHeaders();
+  if (res.socket) res.socket.setNoDelay(true);
 
   const sendEvent = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    const raw = `data: ${JSON.stringify(data)}\n\n`;
+    res.write(raw);
+    if (typeof res.flush === "function") res.flush();
   };
 
-  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
+  const heartbeat = setInterval(() => {
+    res.write(": keepalive\n\n");
+    if (typeof res.flush === "function") res.flush();
+  }, 15000);
   req.on("close", () => {
     clearInterval(heartbeat);
     res.end();
