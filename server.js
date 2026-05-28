@@ -18,13 +18,49 @@ const {
 const app = express();
 
 // ── CORS: Only allow your Netlify frontend ──
-app.use(cors({
-  origin: [
-    "https://nexushub-ai.netlify.app",
-    "http://localhost:3000",
-    "http://127.0.0.1:5500"
-  ]
-}));
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://nexushub-ai.netlify.app",
+  "http://localhost:3000",
+  "http://localhost:5500",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:5500",
+  "http://127.0.0.1:8765"
+];
+
+const configuredOrigins = String(process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredOrigins]);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+
+  try {
+    const { protocol, hostname } = new URL(origin);
+    return protocol === "https:" && (
+      hostname === "nexushub-ai.netlify.app" ||
+      hostname.endsWith("--nexushub-ai.netlify.app")
+    );
+  } catch {
+    return false;
+  }
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    callback(null, isAllowedOrigin(origin));
+  },
+  methods: ["GET", "HEAD", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
+  maxAge: 86400
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: '15mb' }));
 
