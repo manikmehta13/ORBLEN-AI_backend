@@ -19,7 +19,7 @@ app.use(cors({
   ]
 }));
 
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // ── Health check ──
 app.get("/", (req, res) => {
@@ -33,9 +33,9 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
   if (!apiKey) {
     return res.status(503).json({ error: `NVIDIA API key for ${model} not configured on server.` });
   }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90000);
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90000);
     const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -52,6 +52,7 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
       }),
       signal: controller.signal
     });
+    clearTimeout(timeout);
 
     const raw = await response.text();
     let data;
@@ -61,20 +62,15 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
       return res.status(500).json({ error: `NVIDIA NIM (${model}) returned non-JSON: ${raw.slice(0, 120)}` });
     }
 
-    if (data.error) {
-      const errMsg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
-      return res.status(400).json({ error: errMsg });
-    }
+    if (data.error) return res.status(400).json({ error: data.error.message || JSON.stringify(data.error) });
     if (!data.choices?.[0]?.message?.content) {
       return res.status(500).json({ error: `NVIDIA NIM (${model}) returned an unexpected response structure.` });
     }
 
-    return res.json({ result: data.choices[0].message.content });
+    res.json({ result: data.choices[0].message.content });
   } catch (err) {
     const msg = err.name === 'AbortError' ? `NVIDIA NIM (${model}) timed out after 90s.` : `NVIDIA NIM (${model}) request failed: ` + err.message;
     res.status(500).json({ error: msg });
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -83,7 +79,7 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/openai", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("openai/gpt-oss-120b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
 });
 
@@ -92,44 +88,28 @@ app.post("/api/openai", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemini", async (req, res) => {
   const { prompt } = req.body;
-  if (typeof prompt !== "string" || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  if (!prompt) return res.status(400).json({ error: "prompt required" });
 
   if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({ error: "Gemini key not configured on server." });
   }
 
-  const gc = new AbortController();
-  const gt = setTimeout(() => gc.abort(), 30000);
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }]
-        }),
-        signal: gc.signal
+        })
       }
     );
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      let errData;
-      try { errData = JSON.parse(errText); } catch {}
-      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Gemini request failed (${response.status})` });
-    }
     const data = await response.json();
-    const geminiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!geminiText) return res.status(500).json({ error: "Gemini returned empty response" });
-    res.json({ result: geminiText });
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ result: data.candidates[0].content.parts[0].text });
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Gemini request timed out' : err.message;
-    res.status(500).json({ error: "Gemini request failed: " + msg });
-  } finally {
-    clearTimeout(gt);
+    res.status(500).json({ error: "Gemini request failed: " + err.message });
   }
 });
 
@@ -138,14 +118,12 @@ app.post("/api/gemini", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/mistral", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.MISTRAL_API_KEY) {
     return res.status(503).json({ error: "Mistral key not configured on server." });
   }
 
-  const mc = new AbortController();
-  const mt = setTimeout(() => mc.abort(), 30000);
   try {
     const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
@@ -157,23 +135,13 @@ app.post("/api/mistral", async (req, res) => {
         model: "mistral-large-latest",
         messages,
         max_tokens: 16384
-      }),
-      signal: mc.signal
+      })
     });
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      let errData;
-      try { errData = JSON.parse(errText); } catch {}
-      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Mistral request failed (${response.status})` });
-    }
     const data = await response.json();
-    if (!data.choices?.[0]?.message?.content) return res.status(500).json({ error: "Mistral returned empty response" });
+    if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Mistral request timed out' : err.message;
-    res.status(500).json({ error: "Mistral request failed: " + msg });
-  } finally {
-    clearTimeout(mt);
+    res.status(500).json({ error: "Mistral request failed: " + err.message });
   }
 });
 
@@ -182,14 +150,12 @@ app.post("/api/mistral", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/groq", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.GROQ_API_KEY) {
     return res.status(503).json({ error: "Groq key not configured on server." });
   }
 
-  const gc = new AbortController();
-  const gt = setTimeout(() => gc.abort(), 30000);
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -201,23 +167,13 @@ app.post("/api/groq", async (req, res) => {
         model: "llama-3.3-70b-versatile",
         messages,
         max_tokens: 16384
-      }),
-      signal: gc.signal
+      })
     });
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      let errData;
-      try { errData = JSON.parse(errText); } catch {}
-      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Groq request failed (${response.status})` });
-    }
     const data = await response.json();
-    if (!data.choices?.[0]?.message?.content) return res.status(500).json({ error: "Groq returned empty response" });
+    if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Groq request timed out' : err.message;
-    res.status(500).json({ error: "Groq request failed: " + msg });
-  } finally {
-    clearTimeout(gt);
+    res.status(500).json({ error: "Groq request failed: " + err.message });
   }
 });
 
@@ -226,14 +182,12 @@ app.post("/api/groq", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/cohere", async (req, res) => {
   const { prompt } = req.body;
-  if (typeof prompt !== "string" || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  if (!prompt) return res.status(400).json({ error: "prompt required" });
 
   if (!process.env.COHERE_API_KEY) {
     return res.status(503).json({ error: "Cohere key not configured on server." });
   }
 
-  const cc = new AbortController();
-  const ct = setTimeout(() => cc.abort(), 30000);
   try {
     const response = await fetch("https://api.cohere.com/v2/chat", {
       method: "POST",
@@ -245,24 +199,15 @@ app.post("/api/cohere", async (req, res) => {
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 4096
-      }),
-      signal: cc.signal
+      })
     });
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      let errData;
-      try { errData = JSON.parse(errText); } catch {}
-      return res.status(400).json({ error: errData?.message || errData?.error?.message || `Cohere request failed (${response.status})` });
-    }
     const data = await response.json();
+    if (data.message && typeof data.message === "string") return res.status(400).json({ error: data.message });
     const text = data.message?.content?.[0]?.text;
     if (!text) return res.status(500).json({ error: "Cohere returned an unexpected response." });
     res.json({ result: text });
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Cohere request timed out' : err.message;
-    res.status(500).json({ error: "Cohere request failed: " + msg });
-  } finally {
-    clearTimeout(ct);
+    res.status(500).json({ error: "Cohere request failed: " + err.message });
   }
 });
 
@@ -271,7 +216,7 @@ app.post("/api/cohere", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-llama", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages, res);
 });
 
@@ -280,7 +225,7 @@ app.post("/api/nvidia-llama", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemma4", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("google/gemma-4-31b-it", process.env.NVIDIA_KEY_GEMMA4, messages, res);
 });
 
@@ -289,7 +234,7 @@ app.post("/api/gemma4", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/deepseek", async (req, res) => {
   const { messages } = req.body;
-  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
+  if (!messages) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.NVIDIA_KEY_KIMI) {
     return res.status(503).json({ error: "Kimi (NVIDIA NIM) API key not configured on server." });
@@ -419,8 +364,6 @@ OUTPUT RULES:
 
   // Primary: Groq (free, fast)
   if (process.env.GROQ_API_KEY) {
-    const eGc = new AbortController();
-    const eGt = setTimeout(() => eGc.abort(), 15000);
     try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -436,24 +379,18 @@ OUTPUT RULES:
           ],
           max_tokens: 500,
           temperature: 0.3
-        }),
-        signal: eGc.signal
+        })
       });
-      if (!response.ok) throw new Error(`Groq enhance returned ${response.status}`);
       const data = await response.json();
       const enhanced = data.choices?.[0]?.message?.content || prompt;
       return res.json({ result: enhanced });
     } catch (err) {
-      console.error("Groq enhance failed:", err.message);
-    } finally {
-      clearTimeout(eGt);
+      // fall through to NVIDIA fallback
     }
   }
 
   // Fallback: NVIDIA NIM (gpt-oss-120b) — also free
   if (process.env.NVIDIA_KEY_GPTOSS) {
-    const eNc = new AbortController();
-    const eNt = setTimeout(() => eNc.abort(), 15000);
     try {
       const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -470,17 +407,13 @@ OUTPUT RULES:
           max_tokens: 500,
           temperature: 0.3,
           stream: false
-        }),
-        signal: eNc.signal
+        })
       });
-      if (!response.ok) throw new Error(`NVIDIA enhance returned ${response.status}`);
       const raw = await response.text();
       const data = JSON.parse(raw);
       return res.json({ result: data.choices?.[0]?.message?.content || prompt });
     } catch (err) {
-      console.error("NVIDIA enhance failed:", err.message);
-    } finally {
-      clearTimeout(eNt);
+      // safe fallback
     }
   }
 
@@ -516,49 +449,41 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
       .map(m => `${m.role === "user" ? "USER" : "AI"}: ${String(m.content || "").slice(0, 500)}`)
       .join("\n\n");
 
-    const meGc = new AbortController();
-    const meGt = setTimeout(() => meGc.abort(), 15000);
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
+        ],
+        max_tokens: 400,
+        temperature: 0.1
+      })
+    });
+
+    const data = await response.json();
+    let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
+
+    let memories = [];
     try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
-          ],
-          max_tokens: 400,
-          temperature: 0.1
-        }),
-        signal: meGc.signal
-      });
-
-      if (!response.ok) return res.json({ memories: [] });
-      const data = await response.json();
-      let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
-
-      let memories = [];
-      try {
-        rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
-        const match = rawText.match(/\[[\s\S]*\]/);
-        if (match) rawText = match[0];
-        memories = JSON.parse(rawText);
-        if (!Array.isArray(memories)) memories = [];
-        memories = memories
-          .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
-          .slice(0, 3);
-      } catch {
-        memories = [];
-      }
-
-      res.json({ memories });
-    } finally {
-      clearTimeout(meGt);
+      rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
+      const match = rawText.match(/\[[\s\S]*\]/);
+      if (match) rawText = match[0];
+      memories = JSON.parse(rawText);
+      if (!Array.isArray(memories)) memories = [];
+      memories = memories
+        .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
+        .slice(0, 3);
+    } catch {
+      memories = [];
     }
+
+    res.json({ memories });
   } catch (err) {
     res.json({ memories: [] });
   }
@@ -606,108 +531,65 @@ function getActiveAgent(requestedAgent) {
     }
   }
 
-  return { agent: requestedAgent, fallback: true, missing: true };
+  return { agent: requestedAgent, fallback: false };
 }
 
 async function callNvidiaModelBackend(model, apiKey, messages) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90000);
-  try {
-    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        max_tokens: 16384,
-        temperature: 0.7,
-        stream: false
-      }),
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status}: ${text.slice(0, 200)}`);
-    }
-    const data = await response.json();
-    if (!data.choices?.[0]?.message?.content) throw new Error("API returned empty response");
-    return data.choices[0].message.content;
-  } finally {
-    clearTimeout(timeout);
-  }
+  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: 16384,
+      temperature: 0.7,
+      stream: false
+    })
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  return data.choices[0].message.content;
 }
 
 async function callModelBackend(agent, messages) {
   if (agent === "gemini") {
     if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
-    const sysMsg = messages.find(m => m.role === "system");
-    const lastMsg = messages[messages.length - 1];
-    if (!lastMsg?.content) throw new Error("No message content for Gemini");
-    let prompt = lastMsg.content;
-    if (sysMsg?.content) {
-      prompt = `[System Instruction]\n${sysMsg.content}\n\n[User Message]\n${prompt}`;
-    }
-    const gc = new AbortController();
-    const gt = setTimeout(() => gc.abort(), 30000);
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": process.env.GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
-          }),
-          signal: gc.signal
-        }
-      );
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Gemini error ${response.status}: ${text.slice(0, 200)}`);
+    const prompt = messages[messages.length - 1].content;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
       }
-      const data = await response.json();
-      const geminiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!geminiText) throw new Error("Gemini returned empty response");
-      return geminiText;
-    } finally {
-      clearTimeout(gt);
-    }
+    );
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.candidates[0].content.parts[0].text;
   }
 
   if (agent === "groq") {
     if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
-    const gc = new AbortController();
-    const gt = setTimeout(() => gc.abort(), 30000);
-    try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages,
-          max_tokens: 16384
-        }),
-        signal: gc.signal
-      });
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Groq error ${response.status}: ${text.slice(0, 200)}`);
-      }
-      const data = await response.json();
-      if (!data.choices?.[0]?.message?.content) throw new Error("Groq returned empty response");
-      return data.choices[0].message.content;
-    } finally {
-      clearTimeout(gt);
-    }
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages,
+        max_tokens: 16384
+      })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices[0].message.content;
   }
 
   if (agent === "nvidia-llama") {
@@ -732,72 +614,43 @@ async function callModelBackend(agent, messages) {
 
   if (agent === "mistral") {
     if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
-    const mc = new AbortController();
-    const mt = setTimeout(() => mc.abort(), 30000);
-    try {
-      const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "mistral-large-latest",
-          messages,
-          max_tokens: 16384
-        }),
-        signal: mc.signal
-      });
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Mistral error ${response.status}: ${text.slice(0, 200)}`);
-      }
-      const data = await response.json();
-      if (!data.choices?.[0]?.message?.content) throw new Error("Mistral returned empty response");
-      return data.choices[0].message.content;
-    } finally {
-      clearTimeout(mt);
-    }
+    const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "mistral-large-latest",
+        messages,
+        max_tokens: 16384
+      })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices[0].message.content;
   }
 
   if (agent === "cohere") {
     if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
-    const sysMsg = messages.find(m => m.role === "system");
-    const lastMsg = messages[messages.length - 1];
-    if (!lastMsg?.content) throw new Error("No message content for Cohere");
-    let prompt = lastMsg.content;
-    const cohereMessages = [];
-    if (sysMsg?.content) {
-      cohereMessages.push({ role: "system", content: sysMsg.content });
-    }
-    cohereMessages.push({ role: "user", content: prompt });
-    const cc = new AbortController();
-    const ct = setTimeout(() => cc.abort(), 30000);
-    try {
-      const response = await fetch("https://api.cohere.com/v2/chat", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "command-r-plus-08-2024",
-          messages: cohereMessages,
-          max_tokens: 4096
-        }),
-        signal: cc.signal
-      });
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Cohere error ${response.status}: ${text.slice(0, 200)}`);
-      }
-      const data = await response.json();
-      const text = data.message?.content?.[0]?.text;
-      if (!text) throw new Error("Cohere returned empty response.");
-      return text;
-    } finally {
-      clearTimeout(ct);
-    }
+    const prompt = messages[messages.length - 1].content;
+    const response = await fetch("https://api.cohere.com/v2/chat", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "command-r-plus-08-2024",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 4096
+      })
+    });
+    const data = await response.json();
+    if (data.message && typeof data.message === "string") throw new Error(data.message);
+    const text = data.message?.content?.[0]?.text;
+    if (!text) throw new Error("Cohere returned empty response.");
+    return text;
   }
 
   throw new Error("Invalid agent selected.");
@@ -840,7 +693,7 @@ async function fetchWebContextForBranch(topic, branch) {
           answer: result.answer || null
         };
       }
-    } catch (err) { console.error("Tavily search failed:", err.message); }
+    } catch (_) { /* silent — fall through */ }
   }
 
   // ── DuckDuckGo fallback (always free, no key needed) ──
@@ -855,7 +708,7 @@ async function fetchWebContextForBranch(topic, branch) {
         answer: null
       };
     }
-  } catch (err) { console.error("DuckDuckGo search failed:", err.message); }
+  } catch (_) { /* silent */ }
 
   return null; // No usable web data — AI will reason from training only
 }
@@ -1085,7 +938,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
 
 app.post("/api/deep-research", async (req, res) => {
   const { prompt, agent } = req.body;
-  if (typeof prompt !== "string" || !prompt.trim()) {
+  if (!prompt) {
     return res.status(400).json({ error: "prompt required" });
   }
 
@@ -1093,22 +946,11 @@ app.post("/api/deep-research", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
   if (typeof res.flushHeaders === "function") res.flushHeaders();
-  if (res.socket) res.socket.setNoDelay(true);
 
   const sendEvent = (data) => {
-    const raw = `data: ${JSON.stringify(data)}\n\n`;
-    res.write(raw);
-    // Node 18+ uses write(... , callback) — force flush via drain semantics
-    if (typeof res.flush === "function") res.flush();
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
-
-  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    res.end();
-  });
 
   try {
     const activeInfo = getActiveAgent(agent);
@@ -1224,20 +1066,21 @@ app.post("/api/deep-research", async (req, res) => {
     sendEvent({ type: "status", message: "Synthesizing branch findings..." });
 
     let synthesisWebContext = null;
-    sendEvent({ type: "synthesis_search_start", query: plan.topic });
-    try {
-      synthesisWebContext = await fetchWebContextForBranch(
-        plan.topic,
-        { name: "synthesis overview", possibilities: ["key findings", "current state"] }
-      );
-      sendEvent({
-        type: "synthesis_search_end",
-        found: !!synthesisWebContext,
-        service: synthesisWebContext ? synthesisWebContext.service : null
-      });
-    } catch (err) {
-      console.error("Synthesis web search failed:", err.message);
-      sendEvent({ type: "synthesis_search_end", found: false, service: null });
+    if (true) {
+      sendEvent({ type: "synthesis_search_start", query: plan.topic });
+      try {
+        synthesisWebContext = await fetchWebContextForBranch(
+          plan.topic,
+          { name: "synthesis overview", possibilities: ["key findings", "current state"] }
+        );
+        sendEvent({
+          type: "synthesis_search_end",
+          found: !!synthesisWebContext,
+          service: synthesisWebContext ? synthesisWebContext.service : null
+        });
+      } catch (_) {
+        sendEvent({ type: "synthesis_search_end", found: false, service: null });
+      }
     }
 
     let synthesis;
@@ -1252,12 +1095,10 @@ app.post("/api/deep-research", async (req, res) => {
     const finalReport = formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContexts);
 
     sendEvent({ type: "completed", result: finalReport });
-    clearInterval(heartbeat);
     res.end();
   } catch (err) {
     console.error("Deep Research failed:", err);
     sendEvent({ type: "error", message: err.message });
-    clearInterval(heartbeat);
     res.end();
   }
 });
@@ -1275,36 +1116,22 @@ const DEBATE_PERSONAS = [
 ];
 
 app.post("/api/debate", async (req, res) => {
-  const { topic, agents, rounds } = req.body;
-  if (typeof topic !== "string" || !topic.trim()) return res.status(400).json({ error: "topic required" });
-  if (!Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
+  const { topic, agents, rounds, webContext } = req.body;
+  if (!topic) return res.status(400).json({ error: "topic required" });
+  if (!agents || !Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
 
-  const maxRounds = Math.min(Math.max(parseInt(rounds, 10) || 2, 1), 4);
+  const maxRounds = Math.min(Math.max(parseInt(rounds) || 2, 1), 4);
   const selectedAgents = agents.slice(0, 5);
+  const webSection = webContext ? formatWebContextForPrompt(webContext) : "";
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
   if (typeof res.flushHeaders === "function") res.flushHeaders();
-  if (res.socket) res.socket.setNoDelay(true);
 
   const sendEvent = (data) => {
-    const raw = `data: ${JSON.stringify(data)}\n\n`;
-    res.write(raw);
-    if (typeof res.flush === "function") res.flush();
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
-
-  const heartbeat = setInterval(() => {
-    res.write(": keepalive\n\n");
-    if (typeof res.flush === "function") res.flush();
-  }, 15000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    res.end();
-  });
-
-  const webSection = req.body.webContext ? formatWebContextForPrompt(req.body.webContext) : "";
 
   try {
     let transcript = [];
@@ -1507,12 +1334,10 @@ Keep your synthesis thorough but readable. Use proper punctuation throughout.`;
       sendEvent({ type: "error", message: `Consensus synthesis failed: ${err.message}` });
     }
 
-    clearInterval(heartbeat);
     res.end();
   } catch (err) {
     console.error("Debate error:", err);
     sendEvent({ type: "error", message: err.message });
-    clearInterval(heartbeat);
     res.end();
   }
 });
@@ -1629,11 +1454,6 @@ async function handleTavilySearch(query) {
       })
     });
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      console.error(`Tavily error ${response.status}: ${errText.slice(0, 200)}`);
-      return null;
-    }
     const data = await response.json();
 
     if (data.error) {
@@ -1670,11 +1490,6 @@ async function handleSerpAPISearch(query) {
     });
 
     const response = await fetchWithTimeout(`https://serpapi.com/search?${params}`);
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      console.error(`SerpAPI error ${response.status}: ${errText.slice(0, 200)}`);
-      return [];
-    }
     const data = await response.json();
 
     if (data.error) {
@@ -1865,8 +1680,6 @@ DELIVERY RULES:
   ];
 
   if (process.env.GROQ_API_KEY) {
-    const tsGc = new AbortController();
-    const tsGt = setTimeout(() => tsGc.abort(), 15000);
     try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -1879,20 +1692,15 @@ DELIVERY RULES:
           messages,
           max_tokens: 1200,
           temperature: 0.5
-        }),
-        signal: tsGc.signal
+        })
       });
-      if (!response.ok) throw new Error(`Groq TTS-script returned ${response.status}`);
       const data = await response.json();
       const script = data.choices?.[0]?.message?.content?.trim();
       if (script) return res.json({ script });
-    } catch (err) { console.error("Groq TTS-script failed:", err.message); }
-    finally { clearTimeout(tsGt); }
+    } catch (_) { /* fall through to NVIDIA fallback */ }
   }
 
   if (process.env.NVIDIA_KEY_GPTOSS) {
-    const tsNc = new AbortController();
-    const tsNt = setTimeout(() => tsNc.abort(), 15000);
     try {
       const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -1901,27 +1709,403 @@ DELIVERY RULES:
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-120b",
+          model: "openai/gpt-oss-20b",
           messages,
           max_tokens: 1200,
           temperature: 0.4,
           stream: false
-        }),
-        signal: tsNc.signal
+        })
       });
-      if (!response.ok) throw new Error(`NVIDIA TTS-script returned ${response.status}`);
       const data = await response.json();
       const script = data.choices?.[0]?.message?.content?.trim();
       if (script) return res.json({ script });
-    } catch (err) { console.error("NVIDIA TTS-script failed:", err.message); }
-    finally { clearTimeout(tsNt); }
+    } catch (_) { /* fall through to plain-text fallback */ }
   }
 
   // Fallback: return plain text as single chunk (graceful degradation)
   res.json({ script: text });
 });
 
+// ══════════════════════════════════════════════════════════════
+//  ☁️ GOOGLE DRIVE API PROXY ROUTES
+//  Each accepts { accessToken, ...params } and proxies to
+//  Google Drive API v3. The access token is obtained via
+//  Firebase GoogleAuthProvider with drive.file scope.
+// ══════════════════════════════════════════════════════════════
 
+// ─────────────────────────────────────────────────────────────
+//  Helper: universal Drive API proxy call
+// ─────────────────────────────────────────────────────────────
+async function driveApiCall(req, res) {
+  const { accessToken, method = "GET", path, params = {} } = req.body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken required" });
+  if (!path) return res.status(400).json({ error: "path required" });
+
+  try {
+    const queryString = Object.keys(params).length ? '?' + new URLSearchParams(params) : '';
+    const url = `https://www.googleapis.com/drive/v3/${path.replace(/^\//, '')}${queryString}`;
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(method === "GET" || method === "DELETE" ? {} : { "Content-Type": "application/json" })
+      },
+      body: (method === "GET" || method === "DELETE") ? undefined : JSON.stringify(req.body.body)
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.error?.message || data.error || `Drive API error (${response.status})` });
+    }
+    res.json({ ...data, _status: response.status });
+  } catch (err) {
+    res.status(500).json({ error: "Drive API proxy failed: " + err.message });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/list — list files & folders
+//  Body: { accessToken, pageSize?, query?, pageToken? }
+//  Proxies: GET /drive/v3/files
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/list", async (req, res) => {
+  const { accessToken, pageSize = 50, query, pageToken } = req.body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken required" });
+  try {
+    const params = new URLSearchParams({
+      pageSize: String(pageSize),
+      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink,parents,createdTime,fileExtension,iconLink,thumbnailLink),nextPageToken"
+    });
+    if (query) params.set("q", query);
+    if (pageToken) params.set("pageToken", pageToken);
+    params.set("supportsAllDrives", "true");
+    params.set("includeItemsFromAllDrives", "true");
+    if (!query) params.set("q", "trashed=false");
+    const url = `https://www.googleapis.com/drive/v3/files?${params}`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive list failed" });
+    res.json({ files: data.files || [], nextPageToken: data.nextPageToken || null });
+  } catch (err) {
+    res.status(500).json({ error: "Drive list failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/read — read file content (text/plain)
+//  Body: { accessToken, fileId }
+//  Proxies: GET /drive/v3/files/{fileId}?alt=media
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/read", async (req, res) => {
+  const { accessToken, fileId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    // First get file metadata to know mime type (supportsAllDrives allows shared files)
+    const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,mimeType,size,fileExtension&supportsAllDrives=true`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const meta = await metaRes.json();
+    if (!metaRes.ok) return res.status(metaRes.status).json({ error: meta.error?.message || "Drive metadata fetch failed" });
+
+    // If it's a Google Workspace doc, use export
+    if (meta.mimeType?.startsWith("application/vnd.google-apps")) {
+      const exportMime = meta.mimeType === "application/vnd.google-apps.document" ? "text/plain"
+        : meta.mimeType === "application/vnd.google-apps.spreadsheet" ? "text/csv"
+        : meta.mimeType === "application/vnd.google-apps.presentation" ? "text/plain"
+        : "text/plain";
+      const exportRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}&supportsAllDrives=true`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const content = await exportRes.text();
+      return res.json({ name: meta.name, mimeType: meta.mimeType, content });
+    }
+
+    // Regular file — download
+    const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const contentType = dlRes.headers.get("content-type") || "";
+    if (contentType.startsWith("text") || contentType.includes("json") || contentType.includes("javascript")) {
+      const content = await dlRes.text();
+      return res.json({ name: meta.name, mimeType: meta.mimeType, content });
+    }
+    // Binary — return as base64
+    const buffer = await dlRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    res.json({ name: meta.name, mimeType: meta.mimeType, contentBase64: base64, encoding: "base64", contentType });
+  } catch (err) {
+    res.status(500).json({ error: "Drive read failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/write — create or update a file
+//  Body: { accessToken, name, content, mimeType?, parentId?, fileId?, contentBase64?, encoding? }
+//  If encoding === "base64", contentBase64 is decoded to binary and uploaded.
+//  If fileId is provided → PATCH (update); otherwise → POST (create)
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/write", async (req, res) => {
+  const { accessToken, name, content, mimeType = "text/plain", parentId, fileId, contentBase64, encoding } = req.body;
+  if (!accessToken || !name) {
+    return res.status(400).json({ error: "accessToken and name required" });
+  }
+  if (content === undefined && !contentBase64) {
+    return res.status(400).json({ error: "content or contentBase64 required" });
+  }
+  try {
+    const boundary = "nexus_drive_boundary";
+    const metadata = { name, mimeType };
+    if (parentId) metadata.parents = [parentId];
+
+    // Build multipart body parts
+    const metaPart = Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+      "utf-8"
+    );
+    const contentPart = encoding === "base64" && contentBase64
+      ? Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`, "utf-8"),
+          Buffer.from(contentBase64, "base64"),
+          Buffer.from("\r\n", "utf-8")
+        ])
+      : Buffer.from(
+          `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content || ""}\r\n`,
+          "utf-8"
+        );
+    const endPart = Buffer.from(`--${boundary}--`, "utf-8");
+    const body = Buffer.concat([metaPart, contentPart, endPart]);
+
+    const fieldsParam = "&fields=id%2Cname%2CmimeType%2CwebViewLink%2Csize";
+    const url = fileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true${fieldsParam}`
+      : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart${fieldsParam}`;
+
+    const method = fileId ? "PATCH" : "POST";
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive write failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType, webViewLink: data.webViewLink } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive write failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/delete — delete a file or folder
+//  Body: { accessToken, fileId }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/delete", async (req, res) => {
+  const { accessToken, fileId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: data.error?.message || "Drive delete failed" });
+    }
+    res.json({ success: true, fileId });
+  } catch (err) {
+    res.status(500).json({ error: "Drive delete failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/search — full-text search in Drive
+//  Body: { accessToken, query, pageSize? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/search", async (req, res) => {
+  const { accessToken, query, pageSize = 20 } = req.body;
+  if (!accessToken || !query) return res.status(400).json({ error: "accessToken and query required" });
+  try {
+    // Escape single quotes by doubling them (Google Drive API escaping)
+    const esc = (s) => s.replace(/'/g, "\\'").replace(/\\/g, "\\\\");
+    const params = new URLSearchParams({
+      q: `(name contains '${esc(query)}' or fullText contains '${esc(query)}') and trashed=false`,
+      pageSize: String(pageSize),
+      fields: "files(id,name,mimeType,size,modifiedTime,webViewLink)",
+      supportsAllDrives: "true",
+      includeItemsFromAllDrives: "true"
+    });
+    const url = `https://www.googleapis.com/drive/v3/files?${params}`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive search failed" });
+    res.json({ files: data.files || [] });
+  } catch (err) {
+    res.status(500).json({ error: "Drive search failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/mkdir — create a folder
+//  Body: { accessToken, name, parentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/mkdir", async (req, res) => {
+  const { accessToken, name, parentId } = req.body;
+  if (!accessToken || !name) return res.status(400).json({ error: "accessToken and name required" });
+  try {
+    const metadata = { name, mimeType: "application/vnd.google-apps.folder" };
+    if (parentId) metadata.parents = [parentId];
+    const response = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(metadata)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive mkdir failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive mkdir failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/move — move/rename a file
+//  Body: { accessToken, fileId, newName?, parentId?, removeParentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/move", async (req, res) => {
+  const { accessToken, fileId, newName, addParents, removeParents } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const params = new URLSearchParams();
+    params.set("supportsAllDrives", "true");
+    if (addParents) params.set("addParents", addParents);
+    if (removeParents) params.set("removeParents", removeParents);
+    const body = {};
+    if (newName) body.name = newName;
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?${params}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive move failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive move failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/markdown — create a well-formatted Markdown file
+//  Body: { accessToken, name, content, frontmatter?, parentId? }
+//  - Automatically appends .md extension
+//  - Optionally prepends YAML frontmatter (object with title, date, author, tags, etc.)
+//  - Returns file ID, name, and webViewLink for immediate access
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/markdown", async (req, res) => {
+  const { accessToken, name, content, frontmatter, parentId } = req.body;
+  if (!accessToken || !name) return res.status(400).json({ error: "accessToken and name required" });
+  if (!content) return res.status(400).json({ error: "content required" });
+
+  // Ensure .md extension
+  const fileName = name.endsWith(".md") ? name : name + ".md";
+
+  try {
+    // Build final content with optional frontmatter
+    let finalContent = "";
+    if (frontmatter && typeof frontmatter === "object") {
+      const fmLines = ["---"];
+      for (const [key, val] of Object.entries(frontmatter)) {
+        const strVal = typeof val === "object" ? JSON.stringify(val) : String(val);
+        fmLines.push(`${key}: ${strVal}`);
+      }
+      fmLines.push("---\n\n");
+      finalContent = fmLines.join("\n") + content;
+    } else {
+      finalContent = content;
+    }
+
+    const boundary = "nexus_md_boundary";
+    const metadata = { name: fileName, mimeType: "text/markdown" };
+    if (parentId) metadata.parents = [parentId];
+
+    const metaPart = Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+      "utf-8"
+    );
+    const contentPart = Buffer.from(
+      `--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${finalContent}\r\n`,
+      "utf-8"
+    );
+    const endPart = Buffer.from(`--${boundary}--`, "utf-8");
+    const body = Buffer.concat([metaPart, contentPart, endPart]);
+
+    const url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname%2CmimeType%2CwebViewLink%2Csize";
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive markdown create failed" });
+    res.json({
+      file: {
+        id: data.id,
+        name: data.name,
+        mimeType: "text/markdown",
+        webViewLink: data.webViewLink
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Drive markdown create failed: " + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/drive/copy — copy a file
+//  Body: { accessToken, fileId, name?, parentId? }
+// ─────────────────────────────────────────────────────────────
+app.post("/api/drive/copy", async (req, res) => {
+  const { accessToken, fileId, name, parentId } = req.body;
+  if (!accessToken || !fileId) return res.status(400).json({ error: "accessToken and fileId required" });
+  try {
+    const body = {};
+    if (name) body.name = name;
+    if (parentId) body.parents = [parentId];
+    const params = new URLSearchParams({ supportsAllDrives: "true" });
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}/copy?${params}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "Drive copy failed" });
+    res.json({ file: { id: data.id, name: data.name, mimeType: data.mimeType, webViewLink: data.webViewLink } });
+  } catch (err) {
+    res.status(500).json({ error: "Drive copy failed: " + err.message });
+  }
+});
 
 // ── Start server ──
 // ---------------------------------------------------------------------------
@@ -1986,19 +2170,8 @@ app.post("/api/tts", async (req, res) => {
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
 
-    if (audioRes.body && typeof Readable.fromWeb === "function") {
-      Readable.fromWeb(audioRes.body)
-        .on("error", (err) => {
-          console.error("Audio stream error:", err.message);
-          if (!res.headersSent) return res.status(500).end();
-          res.destroy(err);
-        })
-        .pipe(res)
-        .on("error", (err) => {
-          console.error("Audio pipe error:", err.message);
-          res.destroy(err);
-        });
-      return;
+    if (audioRes.body) {
+      return Readable.fromWeb(audioRes.body).pipe(res);
     }
 
     return res.end(Buffer.from(await audioRes.arrayBuffer()));
@@ -2022,11 +2195,4 @@ app.listen(PORT, () => {
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
   ].join(" | ")}`);
-});
-
-// ── Global error handler (must be last) ──
-app.use((err, _req, res, _next) => {
-  console.error("Unhandled error:", err);
-  if (res.headersSent) return;
-  res.status(500).json({ error: "Internal server error" });
 });
