@@ -115,8 +115,13 @@ app.post("/api/gemini", async (req, res) => {
         signal: gc.signal
       }
     );
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      let errData;
+      try { errData = JSON.parse(errText); } catch {}
+      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Gemini request failed (${response.status})` });
+    }
     const data = await response.json();
-    if (!response.ok) return res.status(400).json({ error: data.error?.message || data.error || "Gemini request failed" });
     const geminiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!geminiText) return res.status(500).json({ error: "Gemini returned empty response" });
     res.json({ result: geminiText });
@@ -513,44 +518,47 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
 
     const meGc = new AbortController();
     const meGt = setTimeout(() => meGc.abort(), 15000);
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
-        ],
-        max_tokens: 400,
-        temperature: 0.1
-      }),
-      signal: meGc.signal
-    });
-    clearTimeout(meGt);
-
-    if (!response.ok) return res.json({ memories: [] });
-    const data = await response.json();
-    let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
-
-    let memories = [];
     try {
-      rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
-      const match = rawText.match(/\[[\s\S]*\]/);
-      if (match) rawText = match[0];
-      memories = JSON.parse(rawText);
-      if (!Array.isArray(memories)) memories = [];
-      memories = memories
-        .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
-        .slice(0, 3);
-    } catch {
-      memories = [];
-    }
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
+          ],
+          max_tokens: 400,
+          temperature: 0.1
+        }),
+        signal: meGc.signal
+      });
 
-    res.json({ memories });
+      if (!response.ok) return res.json({ memories: [] });
+      const data = await response.json();
+      let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
+
+      let memories = [];
+      try {
+        rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
+        const match = rawText.match(/\[[\s\S]*\]/);
+        if (match) rawText = match[0];
+        memories = JSON.parse(rawText);
+        if (!Array.isArray(memories)) memories = [];
+        memories = memories
+          .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
+          .slice(0, 3);
+      } catch {
+        memories = [];
+      }
+
+      res.json({ memories });
+    } finally {
+      clearTimeout(meGt);
+    }
   } catch (err) {
     res.json({ memories: [] });
   }
