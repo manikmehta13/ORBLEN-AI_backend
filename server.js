@@ -19,7 +19,7 @@ app.use(cors({
   ]
 }));
 
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '5mb' }));
 
 // ── Health check ──
 app.get("/", (req, res) => {
@@ -33,9 +33,9 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
   if (!apiKey) {
     return res.status(503).json({ error: `NVIDIA API key for ${model} not configured on server.` });
   }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 90000);
     const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -52,7 +52,6 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
       }),
       signal: controller.signal
     });
-    clearTimeout(timeout);
 
     const raw = await response.text();
     let data;
@@ -62,15 +61,20 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
       return res.status(500).json({ error: `NVIDIA NIM (${model}) returned non-JSON: ${raw.slice(0, 120)}` });
     }
 
-    if (data.error) return res.status(400).json({ error: data.error.message || JSON.stringify(data.error) });
+    if (data.error) {
+      const errMsg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
+      return res.status(400).json({ error: errMsg });
+    }
     if (!data.choices?.[0]?.message?.content) {
       return res.status(500).json({ error: `NVIDIA NIM (${model}) returned an unexpected response structure.` });
     }
 
-    res.json({ result: data.choices[0].message.content });
+    return res.json({ result: data.choices[0].message.content });
   } catch (err) {
     const msg = err.name === 'AbortError' ? `NVIDIA NIM (${model}) timed out after 90s.` : `NVIDIA NIM (${model}) request failed: ` + err.message;
     res.status(500).json({ error: msg });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -79,7 +83,7 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/openai", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("openai/gpt-oss-120b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
 });
 
@@ -88,28 +92,39 @@ app.post("/api/openai", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemini", async (req, res) => {
   const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
+  if (typeof prompt !== "string" || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
 
   if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({ error: "Gemini key not configured on server." });
   }
 
+  const gc = new AbortController();
+  const gt = setTimeout(() => gc.abort(), 30000);
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY
+        },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }]
-        })
+        }),
+        signal: gc.signal
       }
     );
     const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
-    res.json({ result: data.candidates[0].content.parts[0].text });
+    if (!response.ok) return res.status(400).json({ error: data.error?.message || data.error || "Gemini request failed" });
+    const geminiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!geminiText) return res.status(500).json({ error: "Gemini returned empty response" });
+    res.json({ result: geminiText });
   } catch (err) {
-    res.status(500).json({ error: "Gemini request failed: " + err.message });
+    const msg = err.name === 'AbortError' ? 'Gemini request timed out' : err.message;
+    res.status(500).json({ error: "Gemini request failed: " + msg });
+  } finally {
+    clearTimeout(gt);
   }
 });
 
@@ -118,12 +133,14 @@ app.post("/api/gemini", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/mistral", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.MISTRAL_API_KEY) {
     return res.status(503).json({ error: "Mistral key not configured on server." });
   }
 
+  const mc = new AbortController();
+  const mt = setTimeout(() => mc.abort(), 30000);
   try {
     const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
@@ -135,13 +152,23 @@ app.post("/api/mistral", async (req, res) => {
         model: "mistral-large-latest",
         messages,
         max_tokens: 16384
-      })
+      }),
+      signal: mc.signal
     });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      let errData;
+      try { errData = JSON.parse(errText); } catch {}
+      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Mistral request failed (${response.status})` });
+    }
     const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
+    if (!data.choices?.[0]?.message?.content) return res.status(500).json({ error: "Mistral returned empty response" });
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    res.status(500).json({ error: "Mistral request failed: " + err.message });
+    const msg = err.name === 'AbortError' ? 'Mistral request timed out' : err.message;
+    res.status(500).json({ error: "Mistral request failed: " + msg });
+  } finally {
+    clearTimeout(mt);
   }
 });
 
@@ -150,12 +177,14 @@ app.post("/api/mistral", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/groq", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.GROQ_API_KEY) {
     return res.status(503).json({ error: "Groq key not configured on server." });
   }
 
+  const gc = new AbortController();
+  const gt = setTimeout(() => gc.abort(), 30000);
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -167,13 +196,23 @@ app.post("/api/groq", async (req, res) => {
         model: "llama-3.3-70b-versatile",
         messages,
         max_tokens: 16384
-      })
+      }),
+      signal: gc.signal
     });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      let errData;
+      try { errData = JSON.parse(errText); } catch {}
+      return res.status(400).json({ error: errData?.error?.message || errData?.error || `Groq request failed (${response.status})` });
+    }
     const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
+    if (!data.choices?.[0]?.message?.content) return res.status(500).json({ error: "Groq returned empty response" });
     res.json({ result: data.choices[0].message.content });
   } catch (err) {
-    res.status(500).json({ error: "Groq request failed: " + err.message });
+    const msg = err.name === 'AbortError' ? 'Groq request timed out' : err.message;
+    res.status(500).json({ error: "Groq request failed: " + msg });
+  } finally {
+    clearTimeout(gt);
   }
 });
 
@@ -182,12 +221,14 @@ app.post("/api/groq", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/cohere", async (req, res) => {
   const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
+  if (typeof prompt !== "string" || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
 
   if (!process.env.COHERE_API_KEY) {
     return res.status(503).json({ error: "Cohere key not configured on server." });
   }
 
+  const cc = new AbortController();
+  const ct = setTimeout(() => cc.abort(), 30000);
   try {
     const response = await fetch("https://api.cohere.com/v2/chat", {
       method: "POST",
@@ -199,15 +240,24 @@ app.post("/api/cohere", async (req, res) => {
         model: "command-r-plus-08-2024",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 4096
-      })
+      }),
+      signal: cc.signal
     });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      let errData;
+      try { errData = JSON.parse(errText); } catch {}
+      return res.status(400).json({ error: errData?.message || errData?.error?.message || `Cohere request failed (${response.status})` });
+    }
     const data = await response.json();
-    if (data.message && typeof data.message === "string") return res.status(400).json({ error: data.message });
     const text = data.message?.content?.[0]?.text;
     if (!text) return res.status(500).json({ error: "Cohere returned an unexpected response." });
     res.json({ result: text });
   } catch (err) {
-    res.status(500).json({ error: "Cohere request failed: " + err.message });
+    const msg = err.name === 'AbortError' ? 'Cohere request timed out' : err.message;
+    res.status(500).json({ error: "Cohere request failed: " + msg });
+  } finally {
+    clearTimeout(ct);
   }
 });
 
@@ -216,7 +266,7 @@ app.post("/api/cohere", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/nvidia-llama", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages, res);
 });
 
@@ -225,7 +275,7 @@ app.post("/api/nvidia-llama", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/gemma4", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
   await callNvidiaModel("google/gemma-4-31b-it", process.env.NVIDIA_KEY_GEMMA4, messages, res);
 });
 
@@ -234,7 +284,7 @@ app.post("/api/gemma4", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/deepseek", async (req, res) => {
   const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
+  if (!Array.isArray(messages)) return res.status(400).json({ error: "messages required" });
 
   if (!process.env.NVIDIA_KEY_KIMI) {
     return res.status(503).json({ error: "Kimi (NVIDIA NIM) API key not configured on server." });
@@ -364,6 +414,8 @@ OUTPUT RULES:
 
   // Primary: Groq (free, fast)
   if (process.env.GROQ_API_KEY) {
+    const eGc = new AbortController();
+    const eGt = setTimeout(() => eGc.abort(), 15000);
     try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -379,18 +431,24 @@ OUTPUT RULES:
           ],
           max_tokens: 500,
           temperature: 0.3
-        })
+        }),
+        signal: eGc.signal
       });
+      if (!response.ok) throw new Error(`Groq enhance returned ${response.status}`);
       const data = await response.json();
       const enhanced = data.choices?.[0]?.message?.content || prompt;
       return res.json({ result: enhanced });
     } catch (err) {
-      // fall through to NVIDIA fallback
+      console.error("Groq enhance failed:", err.message);
+    } finally {
+      clearTimeout(eGt);
     }
   }
 
   // Fallback: NVIDIA NIM (gpt-oss-120b) — also free
   if (process.env.NVIDIA_KEY_GPTOSS) {
+    const eNc = new AbortController();
+    const eNt = setTimeout(() => eNc.abort(), 15000);
     try {
       const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -407,13 +465,17 @@ OUTPUT RULES:
           max_tokens: 500,
           temperature: 0.3,
           stream: false
-        })
+        }),
+        signal: eNc.signal
       });
+      if (!response.ok) throw new Error(`NVIDIA enhance returned ${response.status}`);
       const raw = await response.text();
       const data = JSON.parse(raw);
       return res.json({ result: data.choices?.[0]?.message?.content || prompt });
     } catch (err) {
-      // safe fallback
+      console.error("NVIDIA enhance failed:", err.message);
+    } finally {
+      clearTimeout(eNt);
     }
   }
 
@@ -449,6 +511,8 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
       .map(m => `${m.role === "user" ? "USER" : "AI"}: ${String(m.content || "").slice(0, 500)}`)
       .join("\n\n");
 
+    const meGc = new AbortController();
+    const meGt = setTimeout(() => meGc.abort(), 15000);
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -463,9 +527,12 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
         ],
         max_tokens: 400,
         temperature: 0.1
-      })
+      }),
+      signal: meGc.signal
     });
+    clearTimeout(meGt);
 
+    if (!response.ok) return res.json({ memories: [] });
     const data = await response.json();
     let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
 
@@ -531,65 +598,104 @@ function getActiveAgent(requestedAgent) {
     }
   }
 
-  return { agent: requestedAgent, fallback: false };
+  return { agent: requestedAgent, fallback: true, missing: true };
 }
 
 async function callNvidiaModelBackend(model, apiKey, messages) {
-  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      max_tokens: 16384,
-      temperature: 0.7,
-      stream: false
-    })
-  });
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-  return data.choices[0].message.content;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try {
+    const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: 16384,
+        temperature: 0.7,
+        stream: false
+      }),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`API error ${response.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await response.json();
+    if (!data.choices?.[0]?.message?.content) throw new Error("API returned empty response");
+    return data.choices[0].message.content;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function callModelBackend(agent, messages) {
   if (agent === "gemini") {
     if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
-    const prompt = messages[messages.length - 1].content;
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }]
-        })
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg?.content) throw new Error("No message content for Gemini");
+    const prompt = lastMsg.content;
+    const gc = new AbortController();
+    const gt = setTimeout(() => gc.abort(), 30000);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": process.env.GEMINI_API_KEY
+          },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }]
+          }),
+          signal: gc.signal
+        }
+      );
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Gemini error ${response.status}: ${text.slice(0, 200)}`);
       }
-    );
-    const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.candidates[0].content.parts[0].text;
+      const data = await response.json();
+      const geminiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!geminiText) throw new Error("Gemini returned empty response");
+      return geminiText;
+    } finally {
+      clearTimeout(gt);
+    }
   }
 
   if (agent === "groq") {
     if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages,
-        max_tokens: 16384
-      })
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.choices[0].message.content;
+    const gc = new AbortController();
+    const gt = setTimeout(() => gc.abort(), 30000);
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages,
+          max_tokens: 16384
+        }),
+        signal: gc.signal
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Groq error ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const data = await response.json();
+      if (!data.choices?.[0]?.message?.content) throw new Error("Groq returned empty response");
+      return data.choices[0].message.content;
+    } finally {
+      clearTimeout(gt);
+    }
   }
 
   if (agent === "nvidia-llama") {
@@ -614,43 +720,66 @@ async function callModelBackend(agent, messages) {
 
   if (agent === "mistral") {
     if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
-    const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "mistral-large-latest",
-        messages,
-        max_tokens: 16384
-      })
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.choices[0].message.content;
+    const mc = new AbortController();
+    const mt = setTimeout(() => mc.abort(), 30000);
+    try {
+      const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "mistral-large-latest",
+          messages,
+          max_tokens: 16384
+        }),
+        signal: mc.signal
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Mistral error ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const data = await response.json();
+      if (!data.choices?.[0]?.message?.content) throw new Error("Mistral returned empty response");
+      return data.choices[0].message.content;
+    } finally {
+      clearTimeout(mt);
+    }
   }
 
   if (agent === "cohere") {
     if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
-    const prompt = messages[messages.length - 1].content;
-    const response = await fetch("https://api.cohere.com/v2/chat", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "command-r-plus-08-2024",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 4096
-      })
-    });
-    const data = await response.json();
-    if (data.message && typeof data.message === "string") throw new Error(data.message);
-    const text = data.message?.content?.[0]?.text;
-    if (!text) throw new Error("Cohere returned empty response.");
-    return text;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg?.content) throw new Error("No message content for Cohere");
+    const prompt = lastMsg.content;
+    const cc = new AbortController();
+    const ct = setTimeout(() => cc.abort(), 30000);
+    try {
+      const response = await fetch("https://api.cohere.com/v2/chat", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "command-r-plus-08-2024",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 4096
+        }),
+        signal: cc.signal
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Cohere error ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const data = await response.json();
+      const text = data.message?.content?.[0]?.text;
+      if (!text) throw new Error("Cohere returned empty response.");
+      return text;
+    } finally {
+      clearTimeout(ct);
+    }
   }
 
   throw new Error("Invalid agent selected.");
@@ -693,7 +822,7 @@ async function fetchWebContextForBranch(topic, branch) {
           answer: result.answer || null
         };
       }
-    } catch (_) { /* silent — fall through */ }
+    } catch (err) { console.error("Tavily search failed:", err.message); }
   }
 
   // ── DuckDuckGo fallback (always free, no key needed) ──
@@ -708,7 +837,7 @@ async function fetchWebContextForBranch(topic, branch) {
         answer: null
       };
     }
-  } catch (_) { /* silent */ }
+  } catch (err) { console.error("DuckDuckGo search failed:", err.message); }
 
   return null; // No usable web data — AI will reason from training only
 }
@@ -938,7 +1067,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
 
 app.post("/api/deep-research", async (req, res) => {
   const { prompt, agent } = req.body;
-  if (!prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
     return res.status(400).json({ error: "prompt required" });
   }
 
@@ -951,6 +1080,12 @@ app.post("/api/deep-research", async (req, res) => {
   const sendEvent = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
+
+  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    res.end();
+  });
 
   try {
     const activeInfo = getActiveAgent(agent);
@@ -1066,21 +1201,20 @@ app.post("/api/deep-research", async (req, res) => {
     sendEvent({ type: "status", message: "Synthesizing branch findings..." });
 
     let synthesisWebContext = null;
-    if (true) {
-      sendEvent({ type: "synthesis_search_start", query: plan.topic });
-      try {
-        synthesisWebContext = await fetchWebContextForBranch(
-          plan.topic,
-          { name: "synthesis overview", possibilities: ["key findings", "current state"] }
-        );
-        sendEvent({
-          type: "synthesis_search_end",
-          found: !!synthesisWebContext,
-          service: synthesisWebContext ? synthesisWebContext.service : null
-        });
-      } catch (_) {
-        sendEvent({ type: "synthesis_search_end", found: false, service: null });
-      }
+    sendEvent({ type: "synthesis_search_start", query: plan.topic });
+    try {
+      synthesisWebContext = await fetchWebContextForBranch(
+        plan.topic,
+        { name: "synthesis overview", possibilities: ["key findings", "current state"] }
+      );
+      sendEvent({
+        type: "synthesis_search_end",
+        found: !!synthesisWebContext,
+        service: synthesisWebContext ? synthesisWebContext.service : null
+      });
+    } catch (err) {
+      console.error("Synthesis web search failed:", err.message);
+      sendEvent({ type: "synthesis_search_end", found: false, service: null });
     }
 
     let synthesis;
@@ -1095,10 +1229,12 @@ app.post("/api/deep-research", async (req, res) => {
     const finalReport = formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContexts);
 
     sendEvent({ type: "completed", result: finalReport });
+    clearInterval(heartbeat);
     res.end();
   } catch (err) {
     console.error("Deep Research failed:", err);
     sendEvent({ type: "error", message: err.message });
+    clearInterval(heartbeat);
     res.end();
   }
 });
@@ -1116,13 +1252,12 @@ const DEBATE_PERSONAS = [
 ];
 
 app.post("/api/debate", async (req, res) => {
-  const { topic, agents, rounds, webContext } = req.body;
-  if (!topic) return res.status(400).json({ error: "topic required" });
-  if (!agents || !Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
+  const { topic, agents, rounds } = req.body;
+  if (typeof topic !== "string" || !topic.trim()) return res.status(400).json({ error: "topic required" });
+  if (!Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
 
-  const maxRounds = Math.min(Math.max(parseInt(rounds) || 2, 1), 4);
+  const maxRounds = Math.min(Math.max(parseInt(rounds, 10) || 2, 1), 4);
   const selectedAgents = agents.slice(0, 5);
-  const webSection = webContext ? formatWebContextForPrompt(webContext) : "";
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1132,6 +1267,14 @@ app.post("/api/debate", async (req, res) => {
   const sendEvent = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
+
+  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    res.end();
+  });
+
+  const webSection = req.body.webContext ? formatWebContextForPrompt(req.body.webContext) : "";
 
   try {
     let transcript = [];
@@ -1334,10 +1477,12 @@ Keep your synthesis thorough but readable. Use proper punctuation throughout.`;
       sendEvent({ type: "error", message: `Consensus synthesis failed: ${err.message}` });
     }
 
+    clearInterval(heartbeat);
     res.end();
   } catch (err) {
     console.error("Debate error:", err);
     sendEvent({ type: "error", message: err.message });
+    clearInterval(heartbeat);
     res.end();
   }
 });
@@ -1454,6 +1599,11 @@ async function handleTavilySearch(query) {
       })
     });
 
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      console.error(`Tavily error ${response.status}: ${errText.slice(0, 200)}`);
+      return null;
+    }
     const data = await response.json();
 
     if (data.error) {
@@ -1490,6 +1640,11 @@ async function handleSerpAPISearch(query) {
     });
 
     const response = await fetchWithTimeout(`https://serpapi.com/search?${params}`);
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      console.error(`SerpAPI error ${response.status}: ${errText.slice(0, 200)}`);
+      return [];
+    }
     const data = await response.json();
 
     if (data.error) {
@@ -1680,6 +1835,8 @@ DELIVERY RULES:
   ];
 
   if (process.env.GROQ_API_KEY) {
+    const tsGc = new AbortController();
+    const tsGt = setTimeout(() => tsGc.abort(), 15000);
     try {
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
@@ -1692,15 +1849,20 @@ DELIVERY RULES:
           messages,
           max_tokens: 1200,
           temperature: 0.5
-        })
+        }),
+        signal: tsGc.signal
       });
+      if (!response.ok) throw new Error(`Groq TTS-script returned ${response.status}`);
       const data = await response.json();
       const script = data.choices?.[0]?.message?.content?.trim();
       if (script) return res.json({ script });
-    } catch (_) { /* fall through to NVIDIA fallback */ }
+    } catch (err) { console.error("Groq TTS-script failed:", err.message); }
+    finally { clearTimeout(tsGt); }
   }
 
   if (process.env.NVIDIA_KEY_GPTOSS) {
+    const tsNc = new AbortController();
+    const tsNt = setTimeout(() => tsNc.abort(), 15000);
     try {
       const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
         method: "POST",
@@ -1709,17 +1871,20 @@ DELIVERY RULES:
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-20b",
+          model: "openai/gpt-oss-120b",
           messages,
           max_tokens: 1200,
           temperature: 0.4,
           stream: false
-        })
+        }),
+        signal: tsNc.signal
       });
+      if (!response.ok) throw new Error(`NVIDIA TTS-script returned ${response.status}`);
       const data = await response.json();
       const script = data.choices?.[0]?.message?.content?.trim();
       if (script) return res.json({ script });
-    } catch (_) { /* fall through to plain-text fallback */ }
+    } catch (err) { console.error("NVIDIA TTS-script failed:", err.message); }
+    finally { clearTimeout(tsNt); }
   }
 
   // Fallback: return plain text as single chunk (graceful degradation)
@@ -1791,8 +1956,19 @@ app.post("/api/tts", async (req, res) => {
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
 
-    if (audioRes.body) {
-      return Readable.fromWeb(audioRes.body).pipe(res);
+    if (audioRes.body && typeof Readable.fromWeb === "function") {
+      Readable.fromWeb(audioRes.body)
+        .on("error", (err) => {
+          console.error("Audio stream error:", err.message);
+          if (!res.headersSent) return res.status(500).end();
+          res.destroy(err);
+        })
+        .pipe(res)
+        .on("error", (err) => {
+          console.error("Audio pipe error:", err.message);
+          res.destroy(err);
+        });
+      return;
     }
 
     return res.end(Buffer.from(await audioRes.arrayBuffer()));
@@ -1816,4 +1992,11 @@ app.listen(PORT, () => {
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
   ].join(" | ")}`);
+});
+
+// ── Global error handler (must be last) ──
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Internal server error" });
 });
