@@ -630,6 +630,7 @@ function buildSkillContext(skills) {
     "```language",
     "<complete file content>",
     "```",
+    "Keep the filename on the heading line by itself and include complete, downloadable file contents inside the fence.",
     "Prefer complete, runnable files over fragments when the user asks to build or scaffold something.",
     ""
   ];
