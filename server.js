@@ -37,8 +37,8 @@ function isAllowedOrigin(origin) {
   try {
     const { protocol, hostname } = new URL(origin);
     return protocol === "https:" && (
-      hostname === "nexushub-ai.netlify.app" ||
-      hostname.endsWith("--nexushub-ai.netlify.app")
+      hostname === "nexus-ai-web-app.pages.dev" ||
+      hostname.endsWith("--nexus-ai-web-app.pages.dev")
     );
   } catch {
     return false;
