@@ -20,11 +20,7 @@ const app = express();
 // ── CORS: Only allow your Netlify frontend ──
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://nexushub-ai.netlify.app",
-  "http://localhost:3000",
-  "http://localhost:5500",
-  "http://127.0.0.1:3000",
-  "http://127.0.0.1:5500",
-  "http://127.0.0.1:8765"
+  "https://nexus-ai-web-app.pages.dev/"
 ];
 
 const configuredOrigins = String(process.env.FRONTEND_ORIGINS || "")
