@@ -201,171 +201,14 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 //  🤖 ROUTE 1: OpenAI GPT-OSS-120b  ← via NVIDIA NIM (FREE)
 // ══════════════════════════════════════════════════════════════
-app.post("/api/openai", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("openai/gpt-oss-120b", process.env.NVIDIA_KEY_GPTOSS, messages, res);
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 2: Google (Gemini)
-// ══════════════════════════════════════════════════════════════
-app.post("/api/gemini", async (req, res) => {
-  const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
-
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({ error: "Gemini key not configured on server." });
-  }
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }]
-        })
-      }
-    );
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
-    res.json({ result: data.candidates[0].content.parts[0].text });
-  } catch (err) {
-    res.status(500).json({ error: "Gemini request failed: " + err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 3: Mistral AI
-// ══════════════════════════════════════════════════════════════
-app.post("/api/mistral", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-
-  if (!process.env.MISTRAL_API_KEY) {
-    return res.status(503).json({ error: "Mistral key not configured on server." });
-  }
-
-  try {
-    const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "mistral-large-latest",
-        messages,
-        max_tokens: 16384
-      })
-    });
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
-    res.json({ result: data.choices[0].message.content });
-  } catch (err) {
-    res.status(500).json({ error: "Mistral request failed: " + err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 4: Groq (LLaMA 3.3)
-// ══════════════════════════════════════════════════════════════
-app.post("/api/groq", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-
-  if (!process.env.GROQ_API_KEY) {
-    return res.status(503).json({ error: "Groq key not configured on server." });
-  }
-
-  try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages,
-        max_tokens: 16384
-      })
-    });
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message });
-    res.json({ result: data.choices[0].message.content });
-  } catch (err) {
-    res.status(500).json({ error: "Groq request failed: " + err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🤖 ROUTE 5: Cohere
-// ══════════════════════════════════════════════════════════════
-app.post("/api/cohere", async (req, res) => {
-  const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
-
-  if (!process.env.COHERE_API_KEY) {
-    return res.status(503).json({ error: "Cohere key not configured on server." });
-  }
-
-  try {
-    const response = await fetch("https://api.cohere.com/v2/chat", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "command-r-plus-08-2024",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 4096
-      })
-    });
-    const data = await response.json();
-    if (data.message && typeof data.message === "string") return res.status(400).json({ error: data.message });
-    const text = data.message?.content?.[0]?.text;
-    if (!text) return res.status(500).json({ error: "Cohere returned an unexpected response." });
-    res.json({ result: text });
-  } catch (err) {
-    res.status(500).json({ error: "Cohere request failed: " + err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE 6: Meta LLaMA 3.3 70B — via NVIDIA NIM (FREE)
-// ══════════════════════════════════════════════════════════════
-app.post("/api/nvidia-llama", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("meta/llama-3.3-70b-instruct", process.env.NVIDIA_KEY_LLAMA, messages, res);
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE: Google Gemma 4 31B IT — via NVIDIA NIM
-// ══════════════════════════════════════════════════════════════
-app.post("/api/gemma4", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-  await callNvidiaModel("google/gemma-4-31b-it", process.env.NVIDIA_KEY_GEMMA4, messages, res);
-});
-
-// ══════════════════════════════════════════════════════════════
-//  🆕 ROUTE: DeepSeek (moonshotai/kimi-k2.6) — via NVIDIA NIM
-// ══════════════════════════════════════════════════════════════
-app.post("/api/deepseek", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "messages required" });
-
-  if (!process.env.NVIDIA_KEY_KIMI) {
-    return res.status(503).json({ error: "Kimi (NVIDIA NIM) API key not configured on server." });
-  }
-
-  await callNvidiaModel("moonshotai/kimi-k2.6", process.env.NVIDIA_KEY_KIMI, messages, res, { maxTokens: 65536, temperature: 1.0 });
-});
+app.post("/api/openai", async (req, res) => handleAgenticChatRoute(req, res, "openai"));
+app.post("/api/gemini", async (req, res) => handleAgenticChatRoute(req, res, "gemini", true));
+app.post("/api/mistral", async (req, res) => handleAgenticChatRoute(req, res, "mistral"));
+app.post("/api/groq", async (req, res) => handleAgenticChatRoute(req, res, "groq"));
+app.post("/api/cohere", async (req, res) => handleAgenticChatRoute(req, res, "cohere", true));
+app.post("/api/nvidia-llama", async (req, res) => handleAgenticChatRoute(req, res, "nvidia-llama"));
+app.post("/api/gemma4", async (req, res) => handleAgenticChatRoute(req, res, "gemma4"));
+app.post("/api/deepseek", async (req, res) => handleAgenticChatRoute(req, res, "deepseek"));
 
 // ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
@@ -870,12 +713,109 @@ function formatWebContextForPrompt(webContext) {
   block += "INSTRUCTIONS:\n";
   block += "• SYNTHESIZE both your training knowledge AND the web data above to produce the best answer.\n";
   block += "• Use real-time numbers, figures, and facts from the web to make your response accurate and current.\n";
-  block += "• Use your training knowledge to provide context, historical trends across years, and deeper understanding.\n";
+  block += "• Use your training knowledge to provide context, analyze historical and current trends, and accurately predict future trends and situations based on this data.\n";
   block += "• Cite web sources by number, e.g. [1]. When combining both sources, note what comes from web vs training.\n";
   block += "• If web data conflicts with your training knowledge, defer to the web data (it is more current).\n";
   block += "• Dates are shown where available — prefer more recent sources for time-sensitive topics.\n";
 
   return block;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🌟 AGENTIC ENGINE CORE HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+
+async function executeAgenticSearch(agent, query, sendEvent = null) {
+  if (sendEvent) sendEvent({ type: "status", message: `🔍 Initiating search for: "${query.slice(0,40)}..."` });
+  
+  let webContext = null;
+  const fakeBranch = { name: query, possibilities: [] };
+  webContext = await fetchWebContextForBranch(query, fakeBranch);
+  
+  if (!webContext) return null;
+  
+  const evalPrompt = `You are a research evaluator. 
+I have performed a web search for the query: "${query}".
+Here are the results:
+${formatWebContextForPrompt(webContext)}
+
+Does this provide sufficient and accurate information to provide a deep, well-rounded response? 
+If YES, output exactly the word "SUFFICIENT" and nothing else.
+If NO, output EXACTLY ONE new, improved search query to find the missing information (just the query string, no quotes).`;
+
+  if (sendEvent) sendEvent({ type: "status", message: "🤔 Evaluating search sufficiency..." });
+  
+  try {
+    const evalResponse = await callModelBackend(agent, [{ role: "user", content: evalPrompt }]);
+    const evalText = evalResponse.trim();
+    
+    if (evalText !== "SUFFICIENT") {
+      if (sendEvent) sendEvent({ type: "status", message: `🔄 Refining search: "${evalText.slice(0, 40)}..."` });
+      const secondaryBranch = { name: evalText, possibilities: [] };
+      const secondaryContext = await fetchWebContextForBranch(evalText, secondaryBranch);
+      
+      if (secondaryContext && secondaryContext.results) {
+        webContext.results = [...webContext.results, ...secondaryContext.results].slice(0, 10);
+        webContext.query += " | " + secondaryContext.query;
+      }
+    }
+  } catch (err) {
+    console.error("Agentic search evaluation failed:", err.message);
+  }
+  
+  return webContext;
+}
+
+async function executeCritique(agent, draftText, contextType = "chat", sendEvent = null) {
+  if (sendEvent) sendEvent({ type: "status", message: "⚖️ Critiquing and refining output..." });
+  
+  const critiquePrompt = `You are a strict, expert editor and fact-checker. Review the following drafted response for a ${contextType}.
+  
+DRAFT RESPONSE:
+${draftText}
+
+INSTRUCTIONS:
+1. Identify any logical flaws, hallucinations, missing context, or structural weaknesses.
+2. Fix them and rewrite the response to be as strong, accurate, and logically sound as possible.
+3. Output ONLY the finalized, corrected text. Do not include your critique notes or prefix the text with "Here is the refined response". Just output the final text.`;
+
+  try {
+    const refined = await callModelBackend(agent, [{ role: "user", content: critiquePrompt }]);
+    return refined.trim();
+  } catch (err) {
+    console.error("Critique failed, returning draft:", err.message);
+    return draftText;
+  }
+}
+
+async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePrompt = false) {
+  let messages = req.body.messages;
+  let prompt = req.body.prompt;
+  
+  if (isGeminiOrCoherePrompt) {
+    if (!prompt) return res.status(400).json({ error: "prompt required" });
+    messages = [{ role: "user", content: prompt }];
+  } else {
+    if (!messages) return res.status(400).json({ error: "messages required" });
+  }
+
+  try {
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+    
+    const webContext = await executeAgenticSearch(agentName, lastUserMsg);
+    
+    const chatMessages = [...messages];
+    if (webContext) {
+      chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+    }
+    
+    const initialResponse = await callModelBackend(agentName, chatMessages);
+    const finalResponse = await executeCritique(agentName, initialResponse, "chat conversation");
+    
+    res.json({ result: finalResponse });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
 }
 
 function generateUnicodeTree(plan) {
@@ -897,15 +837,17 @@ function generateUnicodeTree(plan) {
 }
 
 async function generateResearchPlan(agent, query) {
-  const systemPrompt = `Generate a comprehensive, multi-branch research plan for the query.
+  const systemPrompt = `Generate a comprehensive, decision-tree style research plan for the query. 
+The plan MUST explore diverging paths, scenarios, or outcomes arising from the topic (for example, if the query is an exam like "NEET", Branch 1 could be "Successfully Cracking NEET" and Branch 2 could be "Failing to Crack NEET").
 Output ONLY a valid JSON object with the following structure:
 {
   "topic": "Brief topic name",
   "branches": [
-    { "name": "Branch title", "possibilities": ["Possibility A", "Possibility B"] }
+    { "name": "Branch title (e.g., Scenario A / Path 1)", "possibilities": ["Sub-path 1", "Sub-path 2", "Sub-path 3", "Sub-path 4", "Sub-path 5"] }
   ]
 }
-Ensure there are exactly 3 to 4 distinct branches, and each has 2 to 3 key possibilities. Return ONLY the raw JSON object. Do not include markdown code fences or any prose.`;
+Ensure there are 2 to 4 distinct main branches that represent fundamentally different paths or scenarios. 
+CRITICAL: Each main branch MUST have a minimum of 5 sub-branches (possibilities) that explore detailed pathways within that branch (e.g., different career paths, alternative steps). Return ONLY the raw JSON object. Do not include markdown code fences or any prose.`;
 
   const messages = [
     { role: "system", content: systemPrompt },
@@ -930,9 +872,8 @@ function getFallbackPlan(query) {
   return {
     topic: query.slice(0, 40) + "...",
     branches: [
-      { name: "Technical Feasibility & Architecture", possibilities: ["System requirements", "Integration complexity", "Performance overhead"] },
-      { name: "Socio-Economic & Financial Impacts", possibilities: ["Adoption barriers", "Cost-benefit analysis", "Global market scale"] },
-      { name: "Future Roadmap & Strategic Directives", possibilities: ["Short-term solutions", "Long-term scalability", "Key trade-offs"] }
+      { name: "Scenario A: Direct Implementation & Success", possibilities: ["Ideal architecture setup", "Market dominance", "Scalability solutions", "Financial returns", "Ecosystem integration"] },
+      { name: "Scenario B: Alternative Pathways & Mitigation", possibilities: ["Pivot to new technologies", "Addressing adoption barriers", "Cost-saving architectures", "Niche market focus", "Gradual rollout strategies"] }
     ]
   };
 }
@@ -955,9 +896,9 @@ async function expandBranchWithCoT(agent, topic, branch, webContext = null) {
   const prompt = `You are an expert researcher. Conduct a deep-dive analysis on the research branch "${branch.name}" for the main research topic "${topic}".
 Focus specifically on these key possibilities: ${branch.possibilities.join(", ")}.
 ${webSection}
-Apply step-by-step analytical reasoning. Analyze technical feasibility, global impacts, socio-economic challenges, and key trade-offs.${webNote}
+Apply step-by-step analytical reasoning. Analyze past and current trends, predict future trends and situations based on this data. Evaluate technical feasibility, global impacts, socio-economic challenges, and key trade-offs.${webNote}
 
-Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step.
+Write out your step-by-step reasoning explicitly. Begin with a section titled "### Detailed Reasoning" where you walk through your logic step by step, considering both historical context and future predictions.
 Follow this with a section titled "### Key Findings & Analytical Synthesis". IMPORTANT: You MUST structure the final discoveries in this section using clear bullet points or numbered lists, keeping paragraphs short and highly structured so that new users see an appealing, readable output. Do not output raw walls of text.`;
 
   const messages = [{ role: "user", content: prompt }];
@@ -982,8 +923,8 @@ async function synthesizeFindings(agent, topic, branchAnalyses, synthesisWebCont
 
 ${branchText}
 ${webNote}
-Identify key patterns, unexpected connections, global trade-offs, and construct a strategic future roadmap. Output a comprehensive, logical synthesis.
-IMPORTANT: You MUST structure your strategic synthesis thoroughly using bullet points, structured sections, and clear lists for patterns, unexpected connections, trade-offs, and roadmap items, so that the report is visually appealing, readable, and easy for new users to scan. Avoid raw walls of text.`;
+Analyze the past and current trends from the findings to predict future trends and situations. Based on these predictions, identify key patterns, unexpected connections, global trade-offs, and construct a detailed, step-by-step strategic future roadmap for the user. Output a comprehensive, logical synthesis.
+IMPORTANT: You MUST structure your strategic synthesis thoroughly using bullet points, structured sections, and clear lists for patterns, unexpected connections, trade-offs, predictive analysis, and roadmap items, so that the report is visually appealing, readable, and easy for new users to scan. Avoid raw walls of text.`;
 
   const messages = [{ role: "user", content: prompt }];
   return await callModelBackend(agent, messages);
@@ -1001,7 +942,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
   plan.branches.forEach((b, i) => {
     doc += `3.${i + 1} [Branch: ${b.name}](#branch-${b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")})\n`;
   });
-  doc += `3. [Cross-Branch Strategic Synthesis](#-cross-branch-strategic-synthesis)\n`;
+  doc += `3. [Cross-Branch Predictive Analysis & Strategic Synthesis](#-cross-branch-predictive-analysis--strategic-synthesis)\n`;
   doc += `4. [Actionable Recommendations & Next Steps](#-actionable-recommendations--next-steps)\n`;
 
   // Add web sources section if any branches used web search
@@ -1018,7 +959,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
   const webGroundedNote = webBranches.length > 0
     ? ` This report is grounded in **${webBranches.length} live web search${webBranches.length > 1 ? "es" : ""}**, ensuring findings reflect current real-world data.`
     : "";
-  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured research map, conducting parallel deep-dives using step-by-step analytical reasoning, and synthesizing cross-branch discoveries, this report offers key trade-offs and strategic guidance.${webGroundedNote}\n\n`;
+  doc += `This comprehensive research document explores **${plan.topic}** across multiple analytical dimensions. By mapping a structured research map, conducting parallel deep-dives using step-by-step analytical reasoning, and synthesizing cross-branch discoveries, this report analyzes past and current trends to predict future situations and offers key trade-offs and strategic guidance.${webGroundedNote}\n\n`;
 
   doc += `## 🔍 Detailed Branch Analyses\n\n`;
   plan.branches.forEach((b) => {
@@ -1029,7 +970,7 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
     doc += `${branchAnalyses[b.name]}\n\n`;
   });
 
-  doc += `## 🧠 Cross-Branch Strategic Synthesis\n`;
+  doc += `## 🧠 Cross-Branch Predictive Analysis & Strategic Synthesis\n`;
   doc += `${synthesis}\n\n`;
 
   doc += `## 🚀 Actionable Recommendations & Next Steps\n`;
@@ -1133,7 +1074,7 @@ app.post("/api/deep-research", async (req, res) => {
         });
 
         try {
-          webContext = await fetchWebContextForBranch(plan.topic, branch);
+          webContext = await executeAgenticSearch(resolvedAgent, searchQuery, sendEvent);
           sendEvent({
             type: "web_search_end",
             branch: branch.name,
@@ -1161,7 +1102,8 @@ app.post("/api/deep-research", async (req, res) => {
 
       // ── Analysis phase ──
       try {
-        const analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
+        let analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
+        analysis = await executeCritique(resolvedAgent, analysis, "deep research branch analysis", sendEvent);
         branchAnalyses[branch.name] = analysis;
         sendEvent({
           type: "branch_end",
@@ -1328,9 +1270,16 @@ app.post("/api/debate", async (req, res) => {
           ? transcript.map(t => `${t.name} (${t.persona.role}):\n${t.content}`).join("\n\n---\n\n")
           : "";
 
-        const webDataSection = webSection
+        let speakerWebSection = webSection
           ? `\nUse the following current web data to support your arguments where applicable:\n${webSection}`
           : "";
+          
+        if (!webSection) {
+          const searchContext = await executeAgenticSearch(p.agent, `Debate topic: ${topic} - arguments for ${p.persona.role}`, sendEvent);
+          if (searchContext) {
+              speakerWebSection = `\nUse the following current web data to support your arguments where applicable:\n${formatWebContextForPrompt(searchContext)}`;
+          }
+        }
 
         let debatePrompt;
         if (round === 1 && pIdx === 0) {
@@ -1345,7 +1294,7 @@ This is the opening statement of the debate. Present your initial position on th
 • Your main thesis/position on the topic
 • Key supporting arguments and reasoning
 • Evidence or examples where relevant
-${webDataSection}
+${speakerWebSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         } else {
           debatePrompt = `You are participating in a structured multi-AI debate.
@@ -1366,14 +1315,15 @@ Now it's your turn. Respond to the previous speakers. You should:
 • Advance your own unique perspective based on your assigned role
 • Ask thoughtful questions to probe weaknesses in opposing arguments
 • Counter any arguments made against your position
-${webDataSection}
+${speakerWebSection}
 Keep your response focused and concise (2-4 paragraphs). Use proper punctuation throughout.${fallbackNote}`;
         }
 
         const messages = [{ role: "user", content: debatePrompt }];
 
         try {
-          const response = await callModelBackend(p.agent, messages);
+          let response = await callModelBackend(p.agent, messages);
+          response = await executeCritique(p.agent, response, "debate argument", sendEvent);
           transcript.push({
             agent: p.agent,
             name: p.name,
