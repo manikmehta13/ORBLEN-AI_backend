@@ -204,6 +204,7 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 app.post("/api/openai", async (req, res) => handleAgenticChatRoute(req, res, "openai"));
 app.post("/api/gemini", async (req, res) => handleAgenticChatRoute(req, res, "gemini", true));
 app.post("/api/mistral", async (req, res) => handleAgenticChatRoute(req, res, "mistral"));
+app.post("/api/codestral", async (req, res) => handleAgenticChatRoute(req, res, "codestral"));
 app.post("/api/groq", async (req, res) => handleAgenticChatRoute(req, res, "groq"));
 app.post("/api/cohere", async (req, res) => handleAgenticChatRoute(req, res, "cohere", true));
 app.post("/api/nvidia-llama", async (req, res) => handleAgenticChatRoute(req, res, "nvidia-llama"));
@@ -467,6 +468,7 @@ const BACKEND_AGENT_NAMES = {
   gemma4: "Gemma 4 31B IT (NIM)",
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
+  codestral: "Codestral",
   cohere: "Cohere R+",
   groq: "LLaMA Groq"
 };
@@ -483,6 +485,7 @@ function getActiveAgent(requestedAgent) {
     gemma4: process.env.NVIDIA_KEY_GEMMA4,
     gemini: process.env.GEMINI_API_KEY,
     mistral: process.env.MISTRAL_API_KEY,
+    codestral: process.env.CODESTRAL_API_KEY,
     groq: process.env.GROQ_API_KEY,
     cohere: process.env.COHERE_API_KEY
   };
@@ -491,7 +494,7 @@ function getActiveAgent(requestedAgent) {
     return { agent: requestedAgent, fallback: false };
   }
 
-  const fallbackOrder = ["gemini", "groq", "deepseek", "gemma4", "nvidia-llama", "openai", "mistral", "cohere"];
+  const fallbackOrder = ["gemini", "groq", "deepseek", "gemma4", "nvidia-llama", "openai", "mistral", "codestral", "cohere"];
   for (const agent of fallbackOrder) {
     if (keys[agent]) {
       return { agent, fallback: true, original: requestedAgent };
@@ -589,6 +592,25 @@ async function callModelBackend(agent, messages) {
       },
       body: JSON.stringify({
         model: "mistral-large-latest",
+        messages,
+        max_tokens: 16384
+      })
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices[0].message.content;
+  }
+
+  if (agent === "codestral") {
+    if (!process.env.CODESTRAL_API_KEY) throw new Error("Codestral key not configured.");
+    const response = await fetch("https://codestral.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.CODESTRAL_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "codestral-latest",
         messages,
         max_tokens: 16384
       })
@@ -1883,6 +1905,7 @@ app.listen(PORT, () => {
     process.env.NVIDIA_KEY_GEMMA4  ? "✅ Gemma 4 31B IT" : "❌ Gemma 4 31B IT",
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
+    process.env.CODESTRAL_API_KEY  ? "✅ Codestral"    : "❌ Codestral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
