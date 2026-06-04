@@ -20,7 +20,7 @@ const app = express();
 // ── CORS: Only allow your Netlify frontend ──
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://nexushub-ai.netlify.app",
-  "https://nexus-ai-web-app.pages.dev/"
+  "nexusai.manikmehta.workers.dev/"
 ];
 
 const configuredOrigins = String(process.env.FRONTEND_ORIGINS || "")
@@ -37,8 +37,8 @@ function isAllowedOrigin(origin) {
   try {
     const { protocol, hostname } = new URL(origin);
     return protocol === "https:" && (
-      hostname === "nexus-ai-web-app.pages.dev" ||
-      hostname.endsWith("--nexus-ai-web-app.pages.dev")
+      hostname === "nexusai.manikmehta.workers.dev" ||
+      hostname.endsWith("--nexusai.manikmehta.workers.dev")
     );
   } catch {
     return false;
