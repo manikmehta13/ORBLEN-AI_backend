@@ -477,6 +477,30 @@ function getBackendAgentName(a) {
   return BACKEND_AGENT_NAMES[a] || "AI Agent";
 }
 
+const RESPONSE_STYLE_INSTRUCTION = "Default to short, concise, effective answers. There is no fixed word limit: expand only when the user's request, task complexity, safety, code or document output, research/debate mode, or necessary nuance clearly requires more detail. Use focused bullet points or compact paragraphs where appropriate. Avoid padding, repetition, unnecessary background, and raw walls of text.";
+
+function hasResponseStyleInstruction(messages) {
+  return messages.some(m => typeof m.content === "string" && m.content.includes("Default to short, concise, effective answers"));
+}
+
+function addResponseStyleInstructionToMessages(messages) {
+  if (!Array.isArray(messages) || hasResponseStyleInstruction(messages)) return messages;
+
+  if (messages[0]?.role === "system") {
+    return [
+      { ...messages[0], content: `${messages[0].content}\n\n${RESPONSE_STYLE_INSTRUCTION}` },
+      ...messages.slice(1)
+    ];
+  }
+
+  return [{ role: "system", content: RESPONSE_STYLE_INSTRUCTION }, ...messages];
+}
+
+function addResponseStyleInstructionToPrompt(prompt) {
+  if (typeof prompt !== "string" || prompt.includes("Default to short, concise, effective answers")) return prompt;
+  return `[Response Style Instruction: ${RESPONSE_STYLE_INSTRUCTION}]\n\n${prompt}`;
+}
+
 function getActiveAgent(requestedAgent) {
   const keys = {
     openai: process.env.NVIDIA_KEY_GPTOSS,
@@ -736,6 +760,7 @@ function formatWebContextForPrompt(webContext) {
   block += "• SYNTHESIZE both your training knowledge AND the web data above to produce the best answer.\n";
   block += "• Use real-time numbers, figures, and facts from the web to make your response accurate and current.\n";
   block += "• Use your training knowledge to provide context, analyze historical and current trends, and accurately predict future trends and situations based on this data.\n";
+  block += "• Keep the final answer concise by default; expand only when the user's request or required nuance calls for it. Do not follow a fixed word limit.\n";
   block += "• Cite web sources by number, e.g. [1]. When combining both sources, note what comes from web vs training.\n";
   block += "• If web data conflicts with your training knowledge, defer to the web data (it is more current).\n";
   block += "• Dates are shown where available — prefer more recent sources for time-sensitive topics.\n";
@@ -799,7 +824,8 @@ ${draftText}
 INSTRUCTIONS:
 1. Identify any logical flaws, hallucinations, missing context, or structural weaknesses.
 2. Fix them and rewrite the response to be as strong, accurate, and logically sound as possible.
-3. Output ONLY the finalized, corrected text. Do not include your critique notes or prefix the text with "Here is the refined response". Just output the final text.`;
+3. Preserve the intended brevity: keep the finalized response short, concise, and effective unless accuracy or the user's task clearly requires more detail. Do not apply a fixed word limit.
+4. Output ONLY the finalized, corrected text. Do not include your critique notes or prefix the text with "Here is the refined response". Just output the final text.`;
 
   try {
     const refined = await callModelBackend(agent, [{ role: "user", content: critiquePrompt }]);
@@ -816,9 +842,10 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
   
   if (isGeminiOrCoherePrompt) {
     if (!prompt) return res.status(400).json({ error: "prompt required" });
-    messages = [{ role: "user", content: prompt }];
+    messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
   } else {
     if (!messages) return res.status(400).json({ error: "messages required" });
+    messages = addResponseStyleInstructionToMessages(messages);
   }
 
   try {
