@@ -837,6 +837,7 @@ INSTRUCTIONS:
 }
 
 async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePrompt = false) {
+  const lowLatency = req.body.lowLatency === true;
   let messages = req.body.messages;
   let prompt = req.body.prompt;
   
@@ -859,7 +860,9 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
     }
     
     const initialResponse = await callModelBackend(agentName, chatMessages);
-    const finalResponse = await executeCritique(agentName, initialResponse, "chat conversation");
+    const finalResponse = lowLatency
+      ? initialResponse
+      : await executeCritique(agentName, initialResponse, "chat conversation");
     
     res.json({ result: finalResponse });
   } catch(err) {
@@ -1051,7 +1054,8 @@ function formatResearchDocument(plan, branchAnalyses, synthesis, branchWebContex
 }
 
 app.post("/api/deep-research", async (req, res) => {
-  const { prompt, agent } = req.body;
+  const { prompt, agent, lowLatency: requestedLowLatency = false } = req.body;
+  const lowLatency = requestedLowLatency === true;
   if (!prompt) {
     return res.status(400).json({ error: "prompt required" });
   }
@@ -1152,7 +1156,9 @@ app.post("/api/deep-research", async (req, res) => {
       // ── Analysis phase ──
       try {
         let analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
-        analysis = await executeCritique(resolvedAgent, analysis, "deep research branch analysis", sendEvent);
+        if (!lowLatency) {
+          analysis = await executeCritique(resolvedAgent, analysis, "deep research branch analysis", sendEvent);
+        }
         branchAnalyses[branch.name] = analysis;
         sendEvent({
           type: "branch_end",
@@ -1231,7 +1237,8 @@ const DEBATE_PERSONAS = [
 ];
 
 app.post("/api/debate", async (req, res) => {
-  const { topic, agents, rounds, webContext } = req.body;
+  const { topic, agents, rounds, webContext, lowLatency: requestedLowLatency = false } = req.body;
+  const lowLatency = requestedLowLatency === true;
   if (!topic) return res.status(400).json({ error: "topic required" });
   if (!agents || !Array.isArray(agents) || agents.length < 2) return res.status(400).json({ error: "At least 2 agents required" });
 
@@ -1372,7 +1379,9 @@ Keep your response focused and concise (2-4 paragraphs). Use proper punctuation 
 
         try {
           let response = await callModelBackend(p.agent, messages);
-          response = await executeCritique(p.agent, response, "debate argument", sendEvent);
+          if (!lowLatency) {
+            response = await executeCritique(p.agent, response, "debate argument", sendEvent);
+          }
           transcript.push({
             agent: p.agent,
             name: p.name,
