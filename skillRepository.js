@@ -751,6 +751,344 @@ const SKILL_REPOSITORY = [
     sources: ["github-octoverse-2025", "github-fastest-growing-tools", "stackoverflow-2025"]
   },
   {
+    id: "angular-enterprise-frontend",
+    name: "Angular Enterprise Frontend",
+    category: "frontend",
+    horizon: "present",
+    demand: "high",
+    tags: ["angular", "typescript", "rxjs", "enterprise", "frontend", "forms", "spa"],
+    aliases: ["angular app", "angular ui", "rxjs app"],
+    summary: "Builds structured Angular applications with typed components, services, routing, forms, RxJS streams, and maintainable module boundaries.",
+    capabilities: [
+      "Standalone components, routing, guards, and lazy loading",
+      "Reactive forms with validation and clear error states",
+      "Service-driven state and RxJS stream composition",
+      "Enterprise UI patterns for tables, filters, dialogs, and workflows"
+    ],
+    applications: ["enterprise dashboards", "admin portals", "internal tools", "regulated product UIs", "large TypeScript frontends"],
+    bestFor: ["Existing Angular apps", "Complex form-heavy interfaces", "Enterprise frontend modernization"],
+    avoidWhen: ["A small lightweight UI would be easier in plain HTML or a smaller framework"],
+    instructions: [
+      "Prefer standalone components for new Angular work when the project already supports them.",
+      "Keep observable chains readable and unsubscribe through framework-supported patterns.",
+      "Treat form validation and loading states as first-class UI behavior."
+    ],
+    artifactTemplates: ["app.component.ts", "feature.component.ts", "feature.service.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "go-microservices-backend",
+    name: "Go Microservices and APIs",
+    category: "backend",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["go", "golang", "microservices", "api", "grpc", "backend", "concurrency"],
+    aliases: ["golang api", "go service", "grpc service"],
+    summary: "Creates fast, maintainable Go services with clear packages, HTTP or gRPC APIs, concurrency patterns, and production-minded error handling.",
+    capabilities: [
+      "HTTP handlers, routers, middleware, and JSON APIs",
+      "gRPC services and protobuf contracts",
+      "Goroutines, channels, context propagation, and cancellation",
+      "Structured errors, logging, testing, and dependency boundaries"
+    ],
+    applications: ["microservices", "API backends", "workers", "infrastructure tools", "high-throughput services"],
+    bestFor: ["Performance-sensitive services", "Cloud-native backends", "Existing Go projects"],
+    avoidWhen: ["The project needs rapid UI-centric iteration and has no Go runtime"],
+    instructions: [
+      "Keep package boundaries simple and domain-oriented.",
+      "Pass context through request-scoped work.",
+      "Handle cancellation, timeouts, and errors explicitly."
+    ],
+    artifactTemplates: ["main.go", "internal/*/*.go", "proto/*.proto"],
+    sources: ["stackoverflow-2025", "cncf-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "java-spring-boot-services",
+    name: "Java Spring Boot Services",
+    category: "backend",
+    horizon: "evergreen",
+    demand: "high",
+    tags: ["java", "spring", "spring boot", "jpa", "backend", "api", "microservices"],
+    aliases: ["springboot", "java api", "spring service"],
+    summary: "Builds Java backend services with Spring Boot controllers, dependency injection, persistence, validation, security, and reliable project structure.",
+    capabilities: [
+      "REST controllers, DTOs, validation, and exception handlers",
+      "Spring services, repositories, JPA entities, and transactions",
+      "Configuration profiles, tests, and build setup",
+      "Security, auth boundaries, and operational health endpoints"
+    ],
+    applications: ["enterprise APIs", "transactional systems", "microservices", "admin backends", "regulated workflows"],
+    bestFor: ["Existing Java/Spring codebases", "Enterprise backend features", "Strongly structured service layers"],
+    avoidWhen: ["A tiny prototype needs a lighter runtime"],
+    instructions: [
+      "Use DTOs at API boundaries instead of exposing entities directly.",
+      "Keep transactional logic in services.",
+      "Add validation and exception handling near the controller boundary."
+    ],
+    artifactTemplates: ["Controller.java", "Service.java", "Repository.java"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "dotnet-csharp-apis",
+    name: ".NET and C# APIs",
+    category: "backend",
+    horizon: "present",
+    demand: "high",
+    tags: [".net", "dotnet", "c#", "csharp", "asp.net", "api", "backend"],
+    aliases: ["asp.net core", "c# api", "dotnet service"],
+    summary: "Creates .NET APIs and services with minimal APIs or controllers, typed models, dependency injection, EF Core, and production-ready configuration.",
+    capabilities: [
+      "ASP.NET Core routing, controllers, and minimal APIs",
+      "Dependency injection, options, middleware, and filters",
+      "Entity Framework Core models, migrations, and queries",
+      "Authentication, authorization, logging, and health checks"
+    ],
+    applications: ["enterprise APIs", "internal services", "Windows-friendly stacks", "SaaS backends", "integration services"],
+    bestFor: ["Existing .NET projects", "C# backend features", "Teams standardizing on Microsoft ecosystems"],
+    avoidWhen: ["The codebase has no .NET runtime and consistency favors another stack"],
+    instructions: [
+      "Use typed request and response models.",
+      "Keep EF Core migrations deliberate and reviewable.",
+      "Use configuration providers instead of hardcoded environment-specific values."
+    ],
+    artifactTemplates: ["Program.cs", "Controllers/*.cs", "Data/*.cs"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "rust-systems-wasm",
+    name: "Rust Systems and WebAssembly",
+    category: "systems",
+    horizon: "future-facing",
+    demand: "medium-high",
+    tags: ["rust", "wasm", "webassembly", "systems", "performance", "cli", "memory safety"],
+    aliases: ["rustlang", "rust cli", "wasm module"],
+    summary: "Builds memory-safe systems code, command-line tools, high-performance modules, and WebAssembly integrations with Rust.",
+    capabilities: [
+      "Rust project structure, crates, traits, and error handling",
+      "CLI tooling with argument parsing and structured output",
+      "WebAssembly modules and browser or Node integration",
+      "Performance-aware code without sacrificing safety"
+    ],
+    applications: ["CLIs", "performance-sensitive modules", "WASM widgets", "systems tooling", "data processing"],
+    bestFor: ["Performance and safety requirements", "Rust codebases", "WASM-enabled web features"],
+    avoidWhen: ["A simpler scripting language solves the task clearly"],
+    instructions: [
+      "Favor clear ownership and error types over clever lifetime gymnastics.",
+      "Keep unsafe code out unless there is a compelling reason.",
+      "Document build and run commands for Rust or WASM artifacts."
+    ],
+    artifactTemplates: ["Cargo.toml", "src/main.rs", "src/lib.rs"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "laravel-php-apps",
+    name: "Laravel and Modern PHP Apps",
+    category: "backend",
+    horizon: "present",
+    demand: "medium-high",
+    tags: ["laravel", "php", "eloquent", "blade", "api", "mvc", "backend"],
+    aliases: ["modern php", "laravel app", "php mvc"],
+    summary: "Builds modern PHP applications with Laravel routing, controllers, Eloquent models, migrations, queues, validation, and Blade or API workflows.",
+    capabilities: [
+      "Routes, controllers, requests, policies, and middleware",
+      "Eloquent models, relationships, migrations, and seeders",
+      "Blade views, API resources, queues, mail, and jobs",
+      "Validation, authorization, and environment configuration"
+    ],
+    applications: ["business apps", "CMS-style tools", "API backends", "admin panels", "server-rendered products"],
+    bestFor: ["Existing Laravel projects", "PHP apps that need modernization", "CRUD-heavy business workflows"],
+    avoidWhen: ["The project is intentionally framework-free or already on another backend stack"],
+    instructions: [
+      "Use form request validation for user inputs.",
+      "Keep business logic out of Blade templates.",
+      "Prefer migrations and seeders over manual database setup."
+    ],
+    artifactTemplates: ["routes/web.php", "app/Http/Controllers/*.php", "database/migrations/*.php"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "terraform-infrastructure-as-code",
+    name: "Terraform and Infrastructure as Code",
+    category: "devops",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["terraform", "iac", "infrastructure as code", "cloud", "modules", "deployment", "devops"],
+    aliases: ["tf", "infra as code", "cloud infrastructure"],
+    summary: "Defines cloud infrastructure with Terraform modules, variables, state boundaries, environments, and reviewable deployment plans.",
+    capabilities: [
+      "Terraform resources, modules, variables, outputs, and providers",
+      "Environment structure and remote state planning",
+      "Secrets, IAM, networking, and dependency boundaries",
+      "Plan/apply workflow, drift awareness, and documentation"
+    ],
+    applications: ["cloud deployments", "platform foundations", "CI/CD infrastructure", "managed services", "multi-environment apps"],
+    bestFor: ["Repeatable cloud setup", "Infrastructure reviews", "Teams needing auditable changes"],
+    avoidWhen: ["A simple one-click host configuration is enough and IaC would add ceremony"],
+    instructions: [
+      "Keep modules small and purpose-specific.",
+      "Never hardcode secrets in Terraform files.",
+      "Call out state, provider, and environment assumptions."
+    ],
+    artifactTemplates: ["main.tf", "variables.tf", "outputs.tf"],
+    sources: ["cncf-2025", "stackoverflow-2025"]
+  },
+  {
+    id: "cloud-architecture-managed-services",
+    name: "Cloud Architecture and Managed Services",
+    category: "devops",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["cloud", "aws", "azure", "gcp", "architecture", "managed services", "scaling"],
+    aliases: ["cloud architecture", "aws architecture", "azure architecture", "gcp architecture"],
+    summary: "Designs pragmatic cloud architectures using managed compute, storage, databases, networking, security boundaries, and scaling tradeoffs.",
+    capabilities: [
+      "Cloud service selection and deployment topology",
+      "Networking, IAM, secrets, storage, and database boundaries",
+      "Cost, latency, availability, and scaling tradeoff analysis",
+      "Migration and production readiness planning"
+    ],
+    applications: ["SaaS platforms", "AI backends", "data platforms", "migration plans", "production deployments"],
+    bestFor: ["Cloud deployment planning", "Architecture reviews", "Managed-service selection"],
+    avoidWhen: ["A local-only app or static site has no cloud architecture need"],
+    instructions: [
+      "Prefer managed services when they reduce operational burden without hiding critical constraints.",
+      "Document assumptions about traffic, regions, data sensitivity, and budget.",
+      "Keep architecture recommendations tied to the current app shape."
+    ],
+    artifactTemplates: ["architecture.md", "deployment-plan.md", "infra-diagram.md"],
+    sources: ["cncf-2025", "stackoverflow-2025"]
+  },
+  {
+    id: "appsec-secure-code-review",
+    name: "Application Security and Secure Code Review",
+    category: "security",
+    horizon: "evergreen",
+    demand: "high",
+    tags: ["appsec", "security", "secure code review", "owasp", "vulnerability", "threat model", "secrets"],
+    aliases: ["security review", "threat modeling", "vulnerability review"],
+    summary: "Reviews and hardens application code against common vulnerabilities, unsafe data flows, weak authorization, secret exposure, and injection risks.",
+    capabilities: [
+      "Threat modeling for user flows and data boundaries",
+      "Injection, auth, access control, XSS, CSRF, and SSRF review",
+      "Secret handling, dependency risk, and secure configuration",
+      "Practical remediation plans with residual risk notes"
+    ],
+    applications: ["protected APIs", "multi-user apps", "payment or admin workflows", "deployment reviews", "security bug fixes"],
+    bestFor: ["Security-sensitive changes", "Code reviews", "Authentication and authorization features"],
+    avoidWhen: ["The request is purely aesthetic and has no data or execution boundary"],
+    instructions: [
+      "Lead with concrete exploitable risks and affected files.",
+      "Distinguish must-fix vulnerabilities from defense-in-depth improvements.",
+      "Avoid exposing secrets while explaining security findings."
+    ],
+    artifactTemplates: ["security-review.md", "threat-model.md", "remediation-plan.md"],
+    sources: ["stackoverflow-2025"]
+  },
+  {
+    id: "data-engineering-pipelines",
+    name: "Data Engineering Pipelines",
+    category: "data",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["data engineering", "etl", "elt", "pipeline", "warehouse", "airflow", "dbt", "spark"],
+    aliases: ["data pipeline", "analytics engineering", "warehouse pipeline"],
+    summary: "Builds reliable data pipelines with extraction, transformation, validation, orchestration, warehouse modeling, and monitoring.",
+    capabilities: [
+      "ETL and ELT workflow design",
+      "Batch jobs, scheduling, orchestration, and retries",
+      "Warehouse models, transformations, and data quality checks",
+      "Pipeline observability, lineage, and backfill planning"
+    ],
+    applications: ["analytics platforms", "reporting systems", "business intelligence", "event processing", "data migrations"],
+    bestFor: ["Data movement and transformation", "Analytics workflows", "Operational reporting pipelines"],
+    avoidWhen: ["The task is a single frontend chart with already-prepared data"],
+    instructions: [
+      "Define source, destination, freshness, and quality expectations.",
+      "Make jobs idempotent or document backfill behavior.",
+      "Validate data before it reaches user-facing reports."
+    ],
+    artifactTemplates: ["pipeline.py", "models/*.sql", "data-quality.md"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "mlops-model-deployment",
+    name: "MLOps and Model Deployment",
+    category: "ai",
+    horizon: "future-facing",
+    demand: "high",
+    tags: ["mlops", "machine learning", "model deployment", "inference", "monitoring", "ml", "ai"],
+    aliases: ["model serving", "ml deployment", "inference service"],
+    summary: "Deploys and operates machine learning models with inference APIs, experiment tracking, monitoring, versioning, and rollback-aware release flows.",
+    capabilities: [
+      "Model packaging and inference API design",
+      "Experiment tracking and artifact versioning",
+      "Latency, drift, quality, and cost monitoring",
+      "Batch and online inference deployment tradeoffs"
+    ],
+    applications: ["prediction APIs", "AI services", "recommendation systems", "model-backed products", "analytics automation"],
+    bestFor: ["Models that need production deployment", "Inference service design", "ML reliability and monitoring"],
+    avoidWhen: ["The user only needs exploratory analysis or a one-off notebook"],
+    instructions: [
+      "Separate training, evaluation, and serving concerns.",
+      "Track model version, data assumptions, and rollout criteria.",
+      "Plan monitoring for quality drift and operational failures."
+    ],
+    artifactTemplates: ["serve.py", "model-card.md", "deployment.yaml"],
+    sources: ["github-fastest-growing-tools", "cncf-2025", "stackoverflow-2025"]
+  },
+  {
+    id: "browser-automation-scraping",
+    name: "Browser Automation and Web Scraping",
+    category: "automation",
+    horizon: "present",
+    demand: "medium-high",
+    tags: ["browser automation", "scraping", "playwright", "puppeteer", "crawler", "automation", "testing"],
+    aliases: ["web scraping", "browser bot", "crawler"],
+    summary: "Automates browser workflows and data extraction with resilient selectors, pagination handling, waits, exports, and respectful scraping constraints.",
+    capabilities: [
+      "Playwright and Puppeteer navigation, clicks, forms, and screenshots",
+      "Robust selectors, waits, retries, and pagination loops",
+      "HTML parsing, data extraction, and CSV or JSON export",
+      "Rate limiting, login boundaries, and robots-aware constraints"
+    ],
+    applications: ["workflow automation", "QA scripts", "data extraction", "site monitoring", "visual checks"],
+    bestFor: ["Repetitive browser tasks", "Scraping public pages", "End-to-end workflow automation"],
+    avoidWhen: ["The target site forbids automation or an official API is available and sufficient"],
+    instructions: [
+      "Use official APIs before scraping when practical.",
+      "Prefer stable semantic selectors over brittle visual positions.",
+      "Respect rate limits, access rules, and sensitive account boundaries."
+    ],
+    artifactTemplates: ["scrape.js", "automation.spec.ts", "output.csv"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "game-canvas-threejs",
+    name: "Game UI, Canvas, and Three.js",
+    category: "frontend",
+    horizon: "present",
+    demand: "medium",
+    tags: ["game", "canvas", "three.js", "webgl", "animation", "physics", "interactive"],
+    aliases: ["browser game", "threejs", "canvas game"],
+    summary: "Creates interactive browser games and simulations with canvas or Three.js scenes, game loops, input handling, assets, and responsive controls.",
+    capabilities: [
+      "Game loop, input, collision, scoring, and state transitions",
+      "Canvas rendering and sprite-style 2D interfaces",
+      "Three.js scenes, cameras, lights, materials, and controls",
+      "Responsive HUDs, restart states, and visual verification"
+    ],
+    applications: ["browser games", "3D demos", "interactive simulations", "visual tools", "playable prototypes"],
+    bestFor: ["Games or immersive interactive experiences", "3D web scenes", "Canvas-based tools"],
+    avoidWhen: ["The user needs a conventional product UI or static page"],
+    instructions: [
+      "Use a proven game, physics, or 3D library for established mechanics when appropriate.",
+      "Keep the primary play area stable and responsive.",
+      "Verify canvas or WebGL output is nonblank and correctly framed."
+    ],
+    artifactTemplates: ["game.js", "index.html", "scene.ts"],
+    sources: ["github-octoverse-2025", "stackoverflow-2025"]
+  },
+  {
     id: "serverless-edge-functions",
     name: "Serverless and Edge Functions",
     category: "backend",
@@ -836,7 +1174,10 @@ const CODING_INTENT_WORDS = [
   "python", "html", "css", "javascript", "typescript", "server", "dashboard", "artifact", "file",
   "tailwind", "vue", "nuxt", "svelte", "sveltekit", "pwa", "mobile", "graphql", "prisma", "orm",
   "mongodb", "firestore", "dynamodb", "websocket", "streaming", "observability", "automation",
-  "pandas", "prompt", "evals"
+  "pandas", "prompt", "evals", "angular", "rxjs", "golang", "grpc", "java", "spring", "dotnet",
+  "c#", "rust", "wasm", "laravel", "terraform", "iac", "cloud", "aws", "azure", "gcp",
+  "appsec", "security", "etl", "elt", "pipeline", "warehouse", "mlops", "ml", "scraping",
+  "puppeteer", "game", "canvas", "three.js"
 ];
 
 function normalize(text) {
