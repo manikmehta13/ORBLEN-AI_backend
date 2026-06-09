@@ -65,7 +65,7 @@ app.use(express.json({ limit: '15mb' }));
 app.get("/api/skills", (req, res) => {
   res.json({
     success: true,
-    updatedAt: "2026-05-28",
+    updatedAt: "2026-06-09",
     sources: SKILL_SOURCES,
     skills: SKILL_REPOSITORY.map(publicSkill)
   });

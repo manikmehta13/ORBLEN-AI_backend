@@ -465,6 +465,292 @@ const SKILL_REPOSITORY = [
     sources: ["stackoverflow-2025"]
   },
   {
+    id: "tailwind-design-systems",
+    name: "Tailwind CSS and Design Systems",
+    category: "frontend",
+    horizon: "present",
+    demand: "high",
+    tags: ["tailwind", "tailwindcss", "design system", "tokens", "component library", "ui kit", "shadcn"],
+    aliases: ["utility css", "tailwind ui", "design tokens"],
+    summary: "Creates consistent, reusable interface systems with utility-first styling, tokens, variants, and polished component states.",
+    capabilities: [
+      "Design tokens for color, spacing, type, and elevation",
+      "Reusable button, input, card, modal, and navigation variants",
+      "Responsive utility composition without style drift",
+      "Accessible states for focus, hover, loading, disabled, and errors"
+    ],
+    applications: ["SaaS apps", "admin panels", "component libraries", "design refreshes", "rapid frontend builds"],
+    bestFor: ["Projects already using Tailwind", "Reusable UI systems", "Consistent product surfaces"],
+    avoidWhen: ["The project has a mature non-Tailwind design system that should stay consistent"],
+    instructions: [
+      "Use existing tokens and component conventions before adding new ones.",
+      "Keep utility strings readable and extract variants when repetition becomes meaningful.",
+      "Verify responsive behavior for dense UI surfaces."
+    ],
+    artifactTemplates: ["tailwind.config.js", "components/ui/*.tsx", "styles.css"],
+    sources: ["github-octoverse-2025", "stackoverflow-2025"]
+  },
+  {
+    id: "vue-nuxt-product-ui",
+    name: "Vue and Nuxt Product UI",
+    category: "frontend",
+    horizon: "present",
+    demand: "high",
+    tags: ["vue", "vue.js", "nuxt", "pinia", "composition api", "frontend", "spa"],
+    aliases: ["vue3", "nuxt app", "vue app"],
+    summary: "Builds Vue and Nuxt interfaces with composables, reactive state, routing, server rendering, and maintainable component boundaries.",
+    capabilities: [
+      "Vue 3 Composition API components and composables",
+      "Nuxt pages, layouts, route middleware, and data fetching",
+      "Pinia stores and client/server state boundaries",
+      "Accessible forms, lists, dialogs, and navigation"
+    ],
+    applications: ["product dashboards", "content apps", "admin tools", "interactive websites", "server-rendered frontends"],
+    bestFor: ["Existing Vue or Nuxt projects", "Component-driven frontend work", "SSR-friendly Vue apps"],
+    avoidWhen: ["The project is already strongly React or Angular and consistency matters more"],
+    instructions: [
+      "Prefer script setup and Composition API in modern Vue files.",
+      "Keep reusable logic in composables when it is shared across components.",
+      "Separate server-only Nuxt code from browser-only state."
+    ],
+    artifactTemplates: ["pages/*.vue", "components/*.vue", "stores/*.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "sveltekit-web-apps",
+    name: "SvelteKit Web Apps",
+    category: "frontend",
+    horizon: "present-future",
+    demand: "medium-high",
+    tags: ["svelte", "sveltekit", "frontend", "routing", "forms", "stores", "ssr"],
+    aliases: ["svelte app", "kit app"],
+    summary: "Creates compact SvelteKit applications with file-based routing, server actions, stores, and progressive enhancement.",
+    capabilities: [
+      "Svelte components, stores, transitions, and reactive statements",
+      "SvelteKit routes, load functions, actions, and layouts",
+      "Progressive forms and server/client data separation",
+      "Small-bundle interactive interfaces"
+    ],
+    applications: ["fast websites", "interactive tools", "content products", "forms", "lightweight dashboards"],
+    bestFor: ["Svelte or SvelteKit codebases", "Highly interactive small apps", "Performance-sensitive frontend work"],
+    avoidWhen: ["The existing app has a different established framework"],
+    instructions: [
+      "Use SvelteKit load functions for route data.",
+      "Prefer enhanced forms when server actions are involved.",
+      "Keep component state local unless a store is clearly shared."
+    ],
+    artifactTemplates: ["src/routes/+page.svelte", "src/routes/+page.server.ts", "src/lib/*.svelte"],
+    sources: ["github-fastest-growing-tools", "stackoverflow-2025"]
+  },
+  {
+    id: "mobile-pwa-apps",
+    name: "Mobile-First and PWA App Experience",
+    category: "frontend",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["mobile", "pwa", "offline", "service worker", "responsive", "installable", "touch"],
+    aliases: ["progressive web app", "mobile app experience", "offline app"],
+    summary: "Turns web apps into mobile-friendly, installable experiences with offline behavior, touch ergonomics, and resilient loading states.",
+    capabilities: [
+      "Mobile-first layouts and touch-safe controls",
+      "Service worker caching and offline fallbacks",
+      "Web app manifest and installability basics",
+      "Network-aware loading, retry, and sync patterns"
+    ],
+    applications: ["mobile web apps", "field tools", "offline-capable dashboards", "installable portals", "responsive products"],
+    bestFor: ["Apps used heavily on phones", "Offline or unreliable network needs", "Installable web experiences"],
+    avoidWhen: ["A native-only mobile application is explicitly required"],
+    instructions: [
+      "Design primary workflows for small screens before expanding to desktop.",
+      "Keep offline behavior explicit and easy to test.",
+      "Avoid caching sensitive data without a clear privacy boundary."
+    ],
+    artifactTemplates: ["manifest.webmanifest", "service-worker.js", "offline.html"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "graphql-api-integration",
+    name: "GraphQL API Design and Integration",
+    category: "backend",
+    horizon: "present",
+    demand: "medium-high",
+    tags: ["graphql", "schema", "resolver", "apollo", "relay", "api", "queries", "mutations"],
+    aliases: ["gql", "graphql api", "apollo server"],
+    summary: "Designs GraphQL schemas, resolvers, client queries, mutations, pagination, and data-loader patterns for flexible API access.",
+    capabilities: [
+      "Schema modeling and typed resolver boundaries",
+      "Queries, mutations, pagination, and filtering",
+      "N+1 avoidance with batching and data loaders",
+      "Client integration, caching, and generated types"
+    ],
+    applications: ["frontend-heavy products", "multi-client APIs", "data-rich apps", "mobile/web shared backends"],
+    bestFor: ["Apps that need flexible data selection", "Existing GraphQL stacks", "Typed frontend-backend contracts"],
+    avoidWhen: ["Simple REST endpoints would be clearer and cheaper to maintain"],
+    instructions: [
+      "Keep schema names domain-oriented and stable.",
+      "Guard resolver authorization at the field or resource boundary.",
+      "Document pagination and error behavior."
+    ],
+    artifactTemplates: ["schema.graphql", "resolvers.ts", "graphql-client.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "orm-prisma-database-workflows",
+    name: "ORM, Prisma, and Database Workflows",
+    category: "data",
+    horizon: "present",
+    demand: "high",
+    tags: ["prisma", "orm", "database", "migration", "schema", "drizzle", "sequelize", "typeorm"],
+    aliases: ["database orm", "prisma schema", "db migrations"],
+    summary: "Implements application data access with ORM models, migrations, relations, seed data, and query patterns that stay maintainable.",
+    capabilities: [
+      "ORM schema modeling and relation mapping",
+      "Migration planning and rollback-aware changes",
+      "Repository/service data access boundaries",
+      "Seed data, indexes, constraints, and generated clients"
+    ],
+    applications: ["CRUD apps", "SaaS products", "admin panels", "API backends", "multi-tenant systems"],
+    bestFor: ["Database-backed application features", "Existing Prisma or ORM projects", "Schema changes with app code"],
+    avoidWhen: ["Raw SQL is required for complex analytics or database-specific tuning"],
+    instructions: [
+      "Preserve existing migration history and naming conventions.",
+      "Model constraints in the database as well as application code.",
+      "Keep generated files out of manual edits."
+    ],
+    artifactTemplates: ["prisma/schema.prisma", "migrations/*.sql", "seed.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "nosql-document-databases",
+    name: "NoSQL and Document Database Modeling",
+    category: "data",
+    horizon: "present",
+    demand: "high",
+    tags: ["nosql", "mongodb", "firestore", "dynamodb", "document database", "collections", "indexes"],
+    aliases: ["mongo", "document store", "cloud firestore"],
+    summary: "Models document-oriented and key-value data with access patterns, indexes, denormalization, and consistency tradeoffs in mind.",
+    capabilities: [
+      "Collection and document shape design",
+      "Access-pattern-first indexing",
+      "Denormalization and consistency planning",
+      "TTL, partition key, and transaction tradeoff guidance"
+    ],
+    applications: ["real-time apps", "content systems", "event stores", "serverless apps", "high-scale lookup workloads"],
+    bestFor: ["Document-shaped data", "Firestore, MongoDB, or DynamoDB projects", "Flexible schema requirements"],
+    avoidWhen: ["Strong relational integrity and joins are central to the product"],
+    instructions: [
+      "Start from read and write access patterns before choosing document shape.",
+      "Call out consistency and duplication tradeoffs.",
+      "Include indexes for the common query paths."
+    ],
+    artifactTemplates: ["schema-notes.md", "indexes.json", "models.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "realtime-websockets-streaming",
+    name: "Real-Time WebSockets and Streaming",
+    category: "backend",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["websocket", "websockets", "realtime", "streaming", "sse", "socket.io", "events"],
+    aliases: ["real time", "server sent events", "live updates"],
+    summary: "Builds live app experiences with WebSockets, Server-Sent Events, streaming responses, presence, and event-driven UI updates.",
+    capabilities: [
+      "WebSocket and SSE endpoint design",
+      "Connection lifecycle, reconnection, and heartbeat handling",
+      "Room, presence, and pub/sub event patterns",
+      "Streaming UI updates and backpressure awareness"
+    ],
+    applications: ["chat apps", "live dashboards", "collaboration tools", "notifications", "AI streaming responses"],
+    bestFor: ["Live updates", "Chat or collaborative apps", "Streaming model output"],
+    avoidWhen: ["Polling is simpler and latency requirements are loose"],
+    instructions: [
+      "Plan reconnection and stale connection cleanup.",
+      "Authenticate connections before joining rooms or streams.",
+      "Use SSE for one-way server streams when it is enough."
+    ],
+    artifactTemplates: ["socket-server.js", "stream.ts", "realtime-client.ts"],
+    sources: ["stackoverflow-2025", "github-octoverse-2025"]
+  },
+  {
+    id: "observability-reliability",
+    name: "Observability and Reliability Engineering",
+    category: "devops",
+    horizon: "present-future",
+    demand: "high",
+    tags: ["observability", "logging", "metrics", "tracing", "slo", "monitoring", "reliability"],
+    aliases: ["opentelemetry", "logs", "alerts"],
+    summary: "Adds practical logging, metrics, traces, alerts, and reliability checks so production systems are easier to understand and recover.",
+    capabilities: [
+      "Structured logging and request correlation",
+      "Metrics, dashboards, alerts, and SLO signals",
+      "Distributed tracing and OpenTelemetry basics",
+      "Incident-oriented health checks and runbooks"
+    ],
+    applications: ["production APIs", "microservices", "AI services", "cloud deployments", "critical user workflows"],
+    bestFor: ["Systems with uptime or debugging pain", "Backend and deployment work", "Production readiness reviews"],
+    avoidWhen: ["A throwaway prototype is enough and production risk is low"],
+    instructions: [
+      "Instrument important user journeys and service boundaries.",
+      "Avoid logging secrets or sensitive payloads.",
+      "Prefer actionable alerts over noisy signal dumps."
+    ],
+    artifactTemplates: ["logger.ts", "otel.ts", "runbook.md"],
+    sources: ["cncf-2025", "stackoverflow-2025"]
+  },
+  {
+    id: "python-data-automation",
+    name: "Python Data Automation and Scripting",
+    category: "automation",
+    horizon: "present",
+    demand: "high",
+    tags: ["python", "automation", "scripting", "pandas", "etl", "csv", "excel", "data cleaning"],
+    aliases: ["python script", "data wrangling", "spreadsheet automation"],
+    summary: "Automates data cleanup, file processing, reporting, scraping-adjacent workflows, and repeatable scripts with pragmatic Python.",
+    capabilities: [
+      "CSV, Excel, JSON, and text file processing",
+      "Pandas transformations and validation checks",
+      "CLI scripts with arguments and clear output",
+      "Repeatable reports and scheduled data jobs"
+    ],
+    applications: ["data cleanup", "report generation", "business automation", "ETL jobs", "one-off operational scripts"],
+    bestFor: ["Messy files or repeated manual work", "Spreadsheet-adjacent automation", "Python-first data tasks"],
+    avoidWhen: ["A database query or frontend change directly solves the problem"],
+    instructions: [
+      "Use structured parsers for files instead of fragile string splitting.",
+      "Validate input assumptions and handle missing data explicitly.",
+      "Write scripts so they can be rerun safely."
+    ],
+    artifactTemplates: ["script.py", "requirements.txt", "README.md"],
+    sources: ["stackoverflow-2025", "github-fastest-growing-tools"]
+  },
+  {
+    id: "ai-evaluation-prompt-ops",
+    name: "AI Evaluation and Prompt Operations",
+    category: "ai",
+    horizon: "future-facing",
+    demand: "very high",
+    tags: ["ai", "llm", "prompt", "evaluation", "evals", "guardrails", "agents", "model testing"],
+    aliases: ["prompt engineering", "llm evals", "ai quality"],
+    summary: "Improves AI systems with prompt versioning, evaluations, test sets, guardrails, model comparison, and measurable quality loops.",
+    capabilities: [
+      "Prompt structure, versioning, and regression tests",
+      "Golden datasets and rubric-based evaluation",
+      "Model comparison and failure-mode analysis",
+      "Guardrails for safety, formatting, grounding, and tool use"
+    ],
+    applications: ["AI assistants", "agent workflows", "RAG systems", "support bots", "content generation tools"],
+    bestFor: ["AI features that need reliability", "Prompt rewrites", "Model or agent quality reviews"],
+    avoidWhen: ["The task is deterministic and does not involve model behavior"],
+    instructions: [
+      "Define success criteria before tuning prompts.",
+      "Separate system instructions, retrieved context, and user content.",
+      "Track representative failures and add them to evals."
+    ],
+    artifactTemplates: ["prompt.md", "evals.jsonl", "quality-report.md"],
+    sources: ["github-octoverse-2025", "github-fastest-growing-tools", "stackoverflow-2025"]
+  },
+  {
     id: "serverless-edge-functions",
     name: "Serverless and Edge Functions",
     category: "backend",
@@ -547,7 +833,10 @@ const SKILL_REPOSITORY = [
 const CODING_INTENT_WORDS = [
   "build", "create", "make", "code", "implement", "fix", "debug", "website", "app", "api", "backend",
   "frontend", "component", "database", "deploy", "test", "docker", "kubernetes", "react", "node",
-  "python", "html", "css", "javascript", "typescript", "server", "dashboard", "artifact", "file"
+  "python", "html", "css", "javascript", "typescript", "server", "dashboard", "artifact", "file",
+  "tailwind", "vue", "nuxt", "svelte", "sveltekit", "pwa", "mobile", "graphql", "prisma", "orm",
+  "mongodb", "firestore", "dynamodb", "websocket", "streaming", "observability", "automation",
+  "pandas", "prompt", "evals"
 ];
 
 function normalize(text) {
