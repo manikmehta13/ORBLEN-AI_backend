@@ -211,7 +211,6 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 app.post("/api/openai", async (req, res) => handleAgenticChatRoute(req, res, "openai"));
 app.post("/api/gemini", async (req, res) => handleAgenticChatRoute(req, res, "gemini", true));
-app.post("/api/gemini-image", async (req, res) => handleGeminiImageRoute(req, res));
 app.post("/api/mistral", async (req, res) => handleAgenticChatRoute(req, res, "mistral"));
 app.post("/api/codestral", async (req, res) => handleAgenticChatRoute(req, res, "codestral"));
 app.post("/api/groq", async (req, res) => handleAgenticChatRoute(req, res, "groq"));
@@ -476,7 +475,6 @@ const BACKEND_AGENT_NAMES = {
   deepseek: "Kimi K2.6 (NIM)",
   gemma4: "Gemma 4 31B IT (NIM)",
   gemini: "Gemini Flash",
-  "gemini-image": "Gemini 2.5 Flash Image",
   mistral: "Mistral Large",
   codestral: "Codestral",
   cohere: "Cohere R+",
@@ -556,77 +554,6 @@ async function callNvidiaModelBackend(model, apiKey, messages) {
   const data = await response.json();
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   return data.choices[0].message.content;
-}
-
-async function callGeminiImageBackend(prompt) {
-  if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
-
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseModalities: ["Image"]
-        }
-      })
-    }
-  );
-
-  const raw = await response.text();
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error(`Gemini image model returned non-JSON: ${raw.slice(0, 160)}`);
-  }
-
-  if (!response.ok || data.error) {
-    throw new Error(data.error?.message || `Gemini image request failed with status ${response.status}.`);
-  }
-
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  const text = parts
-    .map(part => part.text)
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-
-  const images = parts
-    .filter(part => part.inlineData?.data)
-    .map(part => ({
-      mimeType: part.inlineData.mimeType || "image/png",
-      data: part.inlineData.data
-    }));
-
-  if (!images.length) {
-    const reason = data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason;
-    throw new Error(`Gemini image model returned no image${reason ? ` (${reason})` : ""}.`);
-  }
-
-  return { text, images };
-}
-
-async function handleGeminiImageRoute(req, res) {
-  const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "prompt required" });
-
-  try {
-    const result = await callGeminiImageBackend(prompt);
-    res.json({
-      result: result.text || "Generated image.",
-      model: "gemini-2.5-flash-image",
-      text: result.text,
-      images: result.images
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 }
 
 async function callModelBackend(agent, messages) {
@@ -2020,7 +1947,7 @@ app.listen(PORT, () => {
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
     process.env.NVIDIA_KEY_KIMI    ? "✅ Kimi K2.6"     : "❌ Kimi K2.6",
     process.env.NVIDIA_KEY_GEMMA4  ? "✅ Gemma 4 31B IT" : "❌ Gemma 4 31B IT",
-    process.env.GEMINI_API_KEY     ? "✅ Gemini + Image" : "❌ Gemini",
+    process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
     process.env.MISTRAL_API_KEY    ? "✅ Mistral"      : "❌ Mistral",
     process.env.CODESTRAL_API_KEY  ? "✅ Codestral"    : "❌ Codestral",
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
