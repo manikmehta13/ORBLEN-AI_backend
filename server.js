@@ -19,8 +19,7 @@ const app = express();
 
 // ── CORS: Only allow your Netlify frontend ──
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://nexushub-ai.netlify.app",
-  "nexusai.manikmehta.workers.dev/"
+  "https://nexusai.manikmehta.workers.dev"
 ];
 
 const configuredOrigins = String(process.env.FRONTEND_ORIGINS || "")
@@ -58,7 +57,16 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
+app.use((req, res, next) => {
+  res.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  next();
+});
+
 app.use(express.json({ limit: '15mb' }));
+
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+});
 
 // Skill repository: curated coding capabilities the frontend can browse and
 // the chat flow can inject into model prompts on demand.
