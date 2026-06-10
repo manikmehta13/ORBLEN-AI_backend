@@ -562,7 +562,7 @@ async function callGeminiImageBackend(prompt) {
   if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-image:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
     {
       method: "POST",
       headers: {
