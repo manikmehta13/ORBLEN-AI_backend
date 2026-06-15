@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════╗
-// ║         NEXUS AI — Secure Backend Server                 ║
+// ║         ORBLEN AI — Secure Backend Server                 ║
 // ║   All API keys live HERE — never in the frontend         ║
 // ╚══════════════════════════════════════════════════════════╝
 
@@ -19,7 +19,7 @@ const app = express();
 
 // ── CORS: Only allow your Netlify frontend ──
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://nexusai.manikmehta.workers.dev"
+  "https://orblen.pages.dev"
 ];
 
 const configuredOrigins = String(process.env.FRONTEND_ORIGINS || "")
@@ -36,8 +36,8 @@ function isAllowedOrigin(origin) {
   try {
     const { protocol, hostname } = new URL(origin);
     return protocol === "https:" && (
-      hostname === "nexusai.manikmehta.workers.dev" ||
-      hostname.endsWith("--nexusai.manikmehta.workers.dev")
+      hostname === "orblen.pages.dev" ||
+      hostname.endsWith("--orblen.pages.dev")
     );
   } catch {
     return false;
@@ -155,7 +155,7 @@ app.post("/api/skills/refresh", async (req, res) => {
 
 // ── Health check ──
 app.get("/", (req, res) => {
-  res.json({ status: "✅ NEXUS AI Backend is live", version: "1.0.0" });
+  res.json({ status: "✅ ORBLEN AI Backend is live", version: "1.0.0" });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -1941,7 +1941,7 @@ app.post("/api/tts", async (req, res) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`🚀 NEXUS AI Backend running on port ${PORT}`);
+  console.log(`🚀 ORBLEN AI Backend running on port ${PORT}`);
   console.log(`   Keys loaded: ${[
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
     process.env.NVIDIA_KEY_LLAMA   ? "✅ LLaMA 3.3"   : "❌ LLaMA 3.3",
