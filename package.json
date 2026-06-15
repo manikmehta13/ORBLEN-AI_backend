@@ -1,7 +1,7 @@
 {
-  "name": "nexushub-backend",
+  "name": "orblenhub-backend",
   "version": "1.0.0",
-  "description": "Secure backend for NEXUS AI — keeps all API keys server-side",
+  "description": "Secure backend for ORBLEN AI — keeps all API keys server-side",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
