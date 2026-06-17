@@ -895,7 +895,11 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
   let messages = req.body.messages;
   let prompt = req.body.prompt;
   
-  if (isGeminiOrCoherePrompt) {
+  if (lowLatency) {
+    // In low-latency mode the frontend builds the exact system prompt;
+    // skip backend additions (response style, agentic search, critique).
+    if (!messages) return res.status(400).json({ error: "messages required" });
+  } else if (isGeminiOrCoherePrompt) {
     if (!prompt) return res.status(400).json({ error: "prompt required" });
     messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
   } else {
@@ -904,15 +908,16 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
   }
 
   try {
-    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
-    
-    const webContext = await executeAgenticSearch(agentName, lastUserMsg);
-    
-    const chatMessages = [...messages];
-    if (webContext) {
-      chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+    let chatMessages = messages;
+    if (!lowLatency) {
+      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+      const webContext = await executeAgenticSearch(agentName, lastUserMsg);
+      chatMessages = [...messages];
+      if (webContext) {
+        chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+      }
     }
-    
+
     const initialResponse = await callModelBackend(agentName, chatMessages);
     const finalResponse = lowLatency
       ? initialResponse
@@ -946,7 +951,9 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  if (isGeminiOrCoherePrompt) {
+  if (lowLatency) {
+    if (!messages) { sendEvent({ type: "error", message: "messages required" }); return res.end(); }
+  } else if (isGeminiOrCoherePrompt) {
     if (!prompt) { sendEvent({ type: "error", message: "prompt required" }); return res.end(); }
     messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
   } else {
@@ -955,13 +962,17 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
   }
 
   try {
-    sendEvent({ type: "status", message: "🔍 Searching the web…" });
-    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
-    const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
-
-    const chatMessages = [...messages];
-    if (webContext) {
-      chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+    let chatMessages;
+    if (lowLatency) {
+      chatMessages = messages;
+    } else {
+      sendEvent({ type: "status", message: "🔍 Searching the web…" });
+      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+      const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
+      chatMessages = [...messages];
+      if (webContext) {
+        chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+      }
     }
 
     sendEvent({ type: "status", message: "🤖 Generating response…" });
