@@ -867,29 +867,6 @@ If NO, output EXACTLY ONE new, improved search query to find the missing informa
   return webContext;
 }
 
-async function executeCritique(agent, draftText, contextType = "chat", sendEvent = null) {
-  if (sendEvent) sendEvent({ type: "status", message: "⚖️ Critiquing and refining output..." });
-  
-  const critiquePrompt = `You are a strict, expert editor and fact-checker. Review the following drafted response for a ${contextType}.
-  
-DRAFT RESPONSE:
-${draftText}
-
-INSTRUCTIONS:
-1. Identify any logical flaws, hallucinations, missing context, or structural weaknesses.
-2. Fix them and rewrite the response to be as strong, accurate, and logically sound as possible.
-3. Preserve the intended brevity: keep the finalized response short, concise, and effective unless accuracy or the user's task clearly requires more detail. Do not apply a fixed word limit.
-4. Output ONLY the finalized, corrected text. Do not include your critique notes or prefix the text with "Here is the refined response". Just output the final text.`;
-
-  try {
-    const refined = await callModelBackend(agent, [{ role: "user", content: critiquePrompt }]);
-    return refined.trim();
-  } catch (err) {
-    console.error("Critique failed, returning draft:", err.message);
-    return draftText;
-  }
-}
-
 async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePrompt = false) {
   const lowLatency = req.body.lowLatency === true;
   let messages = req.body.messages;
@@ -918,12 +895,8 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
       }
     }
 
-    const initialResponse = await callModelBackend(agentName, chatMessages);
-    const finalResponse = lowLatency
-      ? initialResponse
-      : await executeCritique(agentName, initialResponse, "chat conversation");
-    
-    res.json({ result: finalResponse });
+    const response = await callModelBackend(agentName, chatMessages);
+    res.json({ result: response });
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
@@ -1098,16 +1071,6 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
     }
 
     sendEvent({ type: "done", result: fullResponse });
-
-    if (!lowLatency) {
-      sendEvent({ type: "status", message: "⚖️ Critiquing output…" });
-      const critiqueResult = await executeCritique(agentName, fullResponse, "chat conversation", sendEvent);
-      if (critiqueResult && critiqueResult !== fullResponse) {
-        fullResponse = critiqueResult;
-        sendEvent({ type: "critique", text: fullResponse });
-      }
-    }
-
     res.end();
   } catch (err) {
     sendEvent({ type: "error", message: err.message });
@@ -1400,10 +1363,7 @@ app.post("/api/deep-research", async (req, res) => {
 
       // ── Analysis phase ──
       try {
-        let analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
-        if (!lowLatency) {
-          analysis = await executeCritique(resolvedAgent, analysis, "deep research branch analysis", sendEvent);
-        }
+        const analysis = await expandBranchWithCoT(resolvedAgent, plan.topic, branch, webContext);
         branchAnalyses[branch.name] = analysis;
         sendEvent({
           type: "branch_end",
@@ -1623,10 +1583,7 @@ Keep your response focused and concise (2-4 paragraphs). Use proper punctuation 
         const messages = [{ role: "user", content: debatePrompt }];
 
         try {
-          let response = await callModelBackend(p.agent, messages);
-          if (!lowLatency) {
-            response = await executeCritique(p.agent, response, "debate argument", sendEvent);
-          }
+          const response = await callModelBackend(p.agent, messages);
           transcript.push({
             agent: p.agent,
             name: p.name,
