@@ -1097,6 +1097,8 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
       throw new Error("Invalid agent selected.");
     }
 
+    sendEvent({ type: "done", result: fullResponse });
+
     if (!lowLatency) {
       sendEvent({ type: "status", message: "⚖️ Critiquing output…" });
       const critiqueResult = await executeCritique(agentName, fullResponse, "chat conversation", sendEvent);
@@ -1106,7 +1108,6 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
       }
     }
 
-    sendEvent({ type: "done", result: fullResponse });
     res.end();
   } catch (err) {
     sendEvent({ type: "error", message: err.message });
