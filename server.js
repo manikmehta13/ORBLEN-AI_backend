@@ -571,16 +571,13 @@ async function streamOpenAICompatibleTokens(res, url, headers, body, sendEvent) 
     body: JSON.stringify({ ...body, stream: true })
   });
   if (!response.ok) {
-    const errText = await response.text();
-    console.error(`[streamOpenAI] HTTP ${response.status} from ${url}:`, errText.slice(0, 300));
-    throw new Error(`API error (${response.status}): ${errText.slice(0, 200)}`);
+    const text = await response.text();
+    throw new Error(`API error (${response.status}): ${text.slice(0, 200)}`);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let fullText = "";
-  let chunkCount = 0;
-  let contentCount = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -590,26 +587,18 @@ async function streamOpenAICompatibleTokens(res, url, headers, body, sendEvent) 
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || !trimmed.startsWith("data: ")) continue;
-      chunkCount++;
       const data = trimmed.slice(6);
-      if (data === "[DONE]") {
-        console.log(`[streamOpenAI] [DONE] after ${chunkCount} chunks, ${contentCount} content chunks, ${fullText.length} chars`);
-        return fullText;
-      }
+      if (data === "[DONE]") return fullText;
       try {
         const parsed = JSON.parse(data);
         const content = parsed.choices?.[0]?.delta?.content || "";
         if (content) {
           fullText += content;
-          contentCount++;
           sendEvent({ type: "token", text: content });
         }
-      } catch (e) {
-        console.warn(`[streamOpenAI] parse error for chunk #${chunkCount}:`, data.slice(0, 80));
-      }
+      } catch (e) { /* skip malformed chunks */ }
     }
   }
-  console.log(`[streamOpenAI] stream ended naturally: ${chunkCount} chunks, ${contentCount} content, ${fullText.length} chars`);
   return fullText;
 }
 
@@ -641,7 +630,7 @@ async function callModelBackend(agent, messages) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-specdec",
+        model: "llama-3.3-70b-versatile",
         messages,
         max_tokens: 8192
       })
@@ -976,62 +965,40 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
       );
     } else if (agentName === "groq") {
       if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
-      const groqUrl = "https://api.groq.com/openai/v1/chat/completions";
-      const groqBody = { model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 8192, temperature: 0.7 };
-      console.log("[GROQ] POST", groqUrl, JSON.stringify({ ...groqBody, messages: `[${chatMessages?.length} msgs]` }));
-      try {
-        const groqRes = await fetch(groqUrl, {
-          method: "POST",
-          headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ ...groqBody, stream: true }),
-          signal: AbortSignal.timeout(30000)
-        });
-        console.log("[GROQ] status:", groqRes.status, groqRes.statusText);
-        if (!groqRes.ok) {
-          const errText = await groqRes.text();
-          console.error("[GROQ] error body:", errText.slice(0, 500));
-          throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`);
-        }
-        const ct = groqRes.headers.get("content-type") || "";
-        console.log("[GROQ] content-type:", ct);
-        let fullText = "";
-        let chunkCount = 0;
-        const reader = groqRes.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith("data: ")) continue;
-            chunkCount++;
-            const data = trimmed.slice(6);
-            if (data === "[DONE]") {
-              console.log("[GROQ] [DONE] after", chunkCount, "lines,", fullText.length, "chars");
-              fullResponse = fullText;
-              break;
+      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!groqRes.ok) {
+        const errText = await groqRes.text();
+        throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`);
+      }
+      fullResponse = "";
+      const reader = groqRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content || "";
+            if (content) {
+              fullResponse += content;
+              sendEvent({ type: "token", text: content });
             }
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content || "";
-              if (content) {
-                fullText += content;
-                sendEvent({ type: "token", text: content });
-              }
-            } catch (e) {
-              if (chunkCount <= 3) console.log("[GROQ] unparseable chunk:", data.slice(0, 100));
-            }
-          }
+          } catch (_) {}
         }
-        if (!fullResponse) fullResponse = fullText;
-        console.log("[GROQ] total chars:", fullResponse.length, "first 100:", fullResponse.slice(0, 100));
-      } catch (e) {
-        console.error("[GROQ] exception:", e.message);
-        throw e;
       }
     } else if (agentName === "mistral") {
       if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
