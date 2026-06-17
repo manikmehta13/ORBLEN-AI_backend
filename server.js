@@ -7,6 +7,9 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const { Readable } = require("stream");
+const { initializeApp: initFirebase, cert } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getDatabase, ref, get, set } = require("firebase-admin/database");
 const {
   SKILL_REPOSITORY,
   SKILL_SOURCES,
@@ -14,6 +17,17 @@ const {
   buildSkillContext,
   publicSkill
 } = require("./skillRepository");
+
+// ── Firebase Admin (for per-user Canva tokens & ID token verification) ──
+let firebaseReady = false;
+const fbRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (fbRaw) {
+  try {
+    const sa = JSON.parse(fbRaw);
+    initFirebase({ credential: cert(sa), databaseURL: "https://storage-53912-default-rtdb.firebaseio.com" });
+    firebaseReady = true;
+  } catch (e) { console.error("Firebase Admin init failed:", e.message); }
+}
 
 const app = express();
 
@@ -226,6 +240,141 @@ app.post("/api/cohere", apiChatRoute("cohere", true));
 app.post("/api/nvidia-llama", apiChatRoute("nvidia-llama"));
 app.post("/api/gemma4", apiChatRoute("gemma4"));
 app.post("/api/deepseek", apiChatRoute("deepseek"));
+
+// ══════════════════════════════════════════════════════════════
+//  🎨 CANVA INTEGRATION  (Connect API via OAuth2 + PKCE)
+//  Per-user token storage via Firebase RTDB
+// ══════════════════════════════════════════════════════════════
+
+const canvaVerifiers = new Map();
+
+// ── Firebase token verification helper ──
+async function getUserUid(authHeader) {
+  if (!firebaseReady) throw new Error("Firebase not initialized");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) throw new Error("Missing auth token");
+  const idToken = authHeader.slice(7);
+  const decoded = await getAuth().verifyIdToken(idToken);
+  return decoded.uid;
+}
+
+// ── RTDB token helpers ──
+function canvaTokensRef(uid) { return ref(getDatabase(), `users/${uid}/canva`); }
+
+async function getCanvaTokens(uid) {
+  const snap = await get(canvaTokensRef(uid));
+  return snap.val() || null;
+}
+
+async function setCanvaTokens(uid, tokens) {
+  await set(canvaTokensRef(uid), tokens);
+}
+
+async function refreshCanvaTokens(uid, current) {
+  const tokenRes = await fetch("https://api.canva.com/rest/v1/oauth/token", {
+    method: "POST",
+    headers: {
+      "Authorization": `Basic ${Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: current.refreshToken })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Canva token refresh failed: " + (data.message || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setCanvaTokens(uid, tokens);
+  return tokens;
+}
+
+async function getCanvaAccessToken(uid) {
+  const tokens = await getCanvaTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Canva not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshCanvaTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+// ── Step 1: Get auth URL (requires Firebase token) ──
+app.get("/api/canva/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    const codeVerifier = crypto.randomBytes(96).toString("base64url");
+    const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+    canvaVerifiers.set(state, { codeVerifier, uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "design:content:write design:meta:read asset:read";
+    const redirectUri = process.env.CANVA_REDIRECT_URI;
+    res.json({
+      url: `https://www.canva.com/api/oauth/authorize?code_challenge=${codeChallenge}&code_challenge_method=s256&scope=${encodeURIComponent(scopes)}&response_type=code&client_id=${process.env.CANVA_CLIENT_ID}&state=${state}&redirect_uri=${encodeURIComponent(redirectUri)}`
+    });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// ── Step 2: OAuth callback (Canva redirects here) ──
+app.get("/api/canva/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = canvaVerifiers.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  canvaVerifiers.delete(state);
+  try {
+    const tokenRes = await fetch("https://api.canva.com/rest/v1/oauth/token", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({ grant_type: "authorization_code", code_verifier: stored.codeVerifier, code, redirect_uri: process.env.CANVA_REDIRECT_URI })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.message || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setCanvaTokens(stored.uid, tokens);
+    const frontend = process.env.FRONTEND_URL || "http://localhost:8888";
+    res.redirect(`${frontend}?canva=connected`);
+  } catch (err) {
+    res.status(500).send("Canva OAuth failed: " + err.message);
+  }
+});
+
+// ── Step 3: Check connection status ──
+app.get("/api/canva/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getCanvaTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch {
+    res.json({ connected: false, expiresAt: 0 });
+  }
+});
+
+// ── Step 4: Create a design ──
+app.post("/api/canva/create-design", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { title, design_type, width, height, asset_id } = req.body;
+    if (!title) return res.status(400).json({ error: "title required" });
+    const token = await getCanvaAccessToken(uid);
+    const body = { type: "type_and_asset", title };
+    if (design_type === "custom" && width && height) {
+      body.design_type = { type: "custom", width, height };
+    } else {
+      body.design_type = { type: "preset", name: design_type || "doc" };
+    }
+    if (asset_id) body.asset_id = asset_id;
+    const designRes = await fetch("https://api.canva.com/rest/v1/designs", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await designRes.json();
+    if (!designRes.ok) throw new Error(data.message || `Canva API error (${designRes.status})`);
+    res.json({ url: data.design.urls.edit_url, view_url: data.design.urls.view_url, design_id: data.design.id, title: data.design.title });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
@@ -2175,5 +2324,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
+    process.env.CANVA_CLIENT_ID    ? "✅ Canva"         : "❌ Canva",
+    firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
