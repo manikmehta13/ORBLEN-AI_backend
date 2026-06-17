@@ -641,9 +641,9 @@ async function callModelBackend(agent, messages) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "llama-3.3-70b-specdec",
         messages,
-        max_tokens: 16384
+        max_tokens: 8192
       })
     });
     const data = await response.json();
@@ -982,7 +982,7 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
           res,
           "https://api.groq.com/openai/v1/chat/completions",
           { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-          { model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 16384, temperature: 0.7 },
+          { model: "llama-3.3-70b-specdec", messages: chatMessages, max_tokens: 8192, temperature: 0.7 },
           sendEvent
         );
         console.log("[GROQ] Response length:", fullResponse?.length, "first 100:", fullResponse?.slice(0, 100));
