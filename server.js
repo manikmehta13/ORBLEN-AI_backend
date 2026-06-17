@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const { Readable } = require("stream");
 const { initializeApp: initFirebase, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
-const { getDatabase, ref, get, set } = require("firebase-admin/database");
+const { getDatabase } = require("firebase-admin/database");
 const {
   SKILL_REPOSITORY,
   SKILL_SOURCES,
@@ -259,15 +259,15 @@ async function getUserUid(authHeader) {
 }
 
 // ── RTDB token helpers ──
-function canvaTokensRef(uid) { return ref(getDatabase(), `users/${uid}/canva`); }
+const canvaDb = () => getDatabase();
 
 async function getCanvaTokens(uid) {
-  const snap = await get(canvaTokensRef(uid));
+  const snap = await canvaDb().ref(`users/${uid}/canva`).once("value");
   return snap.val() || null;
 }
 
 async function setCanvaTokens(uid, tokens) {
-  await set(canvaTokensRef(uid), tokens);
+  await canvaDb().ref(`users/${uid}/canva`).set(tokens);
 }
 
 async function refreshCanvaTokens(uid, current) {
