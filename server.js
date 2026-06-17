@@ -209,15 +209,23 @@ async function callNvidiaModel(model, apiKey, messages, res, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 //  🤖 ROUTE 1: OpenAI GPT-OSS-120b  ← via NVIDIA NIM (FREE)
 // ══════════════════════════════════════════════════════════════
-app.post("/api/openai", async (req, res) => handleAgenticChatRoute(req, res, "openai"));
-app.post("/api/gemini", async (req, res) => handleAgenticChatRoute(req, res, "gemini", true));
-app.post("/api/mistral", async (req, res) => handleAgenticChatRoute(req, res, "mistral"));
-app.post("/api/codestral", async (req, res) => handleAgenticChatRoute(req, res, "codestral"));
-app.post("/api/groq", async (req, res) => handleAgenticChatRoute(req, res, "groq"));
-app.post("/api/cohere", async (req, res) => handleAgenticChatRoute(req, res, "cohere", true));
-app.post("/api/nvidia-llama", async (req, res) => handleAgenticChatRoute(req, res, "nvidia-llama"));
-app.post("/api/gemma4", async (req, res) => handleAgenticChatRoute(req, res, "gemma4"));
-app.post("/api/deepseek", async (req, res) => handleAgenticChatRoute(req, res, "deepseek"));
+function apiChatRoute(agentName, isGeminiOrCoherePrompt = false) {
+  return async (req, res) => {
+    if (req.body.stream) {
+      return handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoherePrompt);
+    }
+    return handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePrompt);
+  };
+}
+app.post("/api/openai", apiChatRoute("openai"));
+app.post("/api/gemini", apiChatRoute("gemini", true));
+app.post("/api/mistral", apiChatRoute("mistral"));
+app.post("/api/codestral", apiChatRoute("codestral"));
+app.post("/api/groq", apiChatRoute("groq"));
+app.post("/api/cohere", apiChatRoute("cohere", true));
+app.post("/api/nvidia-llama", apiChatRoute("nvidia-llama"));
+app.post("/api/gemma4", apiChatRoute("gemma4"));
+app.post("/api/deepseek", apiChatRoute("deepseek"));
 
 // ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
@@ -556,6 +564,44 @@ async function callNvidiaModelBackend(model, apiKey, messages) {
   return data.choices[0].message.content;
 }
 
+async function streamOpenAICompatibleTokens(res, url, headers, body, sendEvent) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ ...body, stream: true })
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`API error (${response.status}): ${text.slice(0, 200)}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullText = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return fullText;
+      try {
+        const parsed = JSON.parse(data);
+        const content = parsed.choices?.[0]?.delta?.content || "";
+        if (content) {
+          fullText += content;
+          sendEvent({ type: "token", text: content });
+        }
+      } catch (e) { /* skip malformed chunks */ }
+    }
+  }
+  return fullText;
+}
+
 async function callModelBackend(agent, messages) {
   if (agent === "gemini") {
     if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
@@ -875,6 +921,185 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
     res.json({ result: finalResponse });
   } catch(err) {
     res.status(500).json({ error: err.message });
+  }
+}
+
+const NVIDIA_MODEL_MAP = {
+  openai:        { model: "openai/gpt-oss-120b",         key: "NVIDIA_KEY_GPTOSS" },
+  "nvidia-llama":{ model: "meta/llama-3.3-70b-instruct", key: "NVIDIA_KEY_LLAMA" },
+  deepseek:      { model: "moonshotai/kimi-k2.6",        key: "NVIDIA_KEY_KIMI" },
+  gemma4:        { model: "google/gemma-4-31b-it",       key: "NVIDIA_KEY_GEMMA4" },
+};
+
+async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoherePrompt = false) {
+  const lowLatency = req.body.lowLatency === true;
+  let messages = req.body.messages;
+  let prompt = req.body.prompt;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  if (isGeminiOrCoherePrompt) {
+    if (!prompt) { sendEvent({ type: "error", message: "prompt required" }); return res.end(); }
+    messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
+  } else {
+    if (!messages) { sendEvent({ type: "error", message: "messages required" }); return res.end(); }
+    messages = addResponseStyleInstructionToMessages(messages);
+  }
+
+  try {
+    sendEvent({ type: "status", message: "🔍 Searching the web…" });
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+    const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
+
+    const chatMessages = [...messages];
+    if (webContext) {
+      chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
+    }
+
+    sendEvent({ type: "status", message: "🤖 Generating response…" });
+
+    let fullResponse = "";
+
+    if (NVIDIA_MODEL_MAP[agentName]) {
+      const { model, key } = NVIDIA_MODEL_MAP[agentName];
+      const apiKey = process.env[key];
+      if (!apiKey) throw new Error(`${agentName} key not configured.`);
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        { model, messages: chatMessages, max_tokens: 16384, temperature: 0.7 },
+        sendEvent
+      );
+    } else if (agentName === "groq") {
+      if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://api.groq.com/openai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        { model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agentName === "mistral") {
+      if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://api.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "mistral-large-latest", messages: chatMessages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agentName === "codestral") {
+      if (!process.env.CODESTRAL_API_KEY) throw new Error("Codestral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://codestral.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.CODESTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "codestral-latest", messages: chatMessages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agentName === "gemini") {
+      if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+      const geminiPrompt = chatMessages[chatMessages.length - 1].content;
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse&key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: geminiPrompt }] }] })
+        }
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Gemini API error (${response.status}): ${text.slice(0, 200)}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          try {
+            const parsed = JSON.parse(data);
+            const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            if (text) {
+              fullResponse += text;
+              sendEvent({ type: "token", text });
+            }
+          } catch (e) { /* skip malformed */ }
+        }
+      }
+    } else if (agentName === "cohere") {
+      if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
+      const coherePrompt = chatMessages[chatMessages.length - 1].content;
+      const response = await fetch("https://api.cohere.com/v2/chat", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.COHERE_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "command-r-plus-08-2024",
+          messages: [{ role: "user", content: coherePrompt }],
+          max_tokens: 4096,
+          stream: true
+        })
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cohere API error (${response.status}): ${text.slice(0, 200)}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed.type === "content-delta" && parsed.delta?.message?.content?.text) {
+              fullResponse += parsed.delta.message.content.text;
+              sendEvent({ type: "token", text: parsed.delta.message.content.text });
+            }
+          } catch (e) { /* skip */ }
+        }
+      }
+    } else {
+      throw new Error("Invalid agent selected.");
+    }
+
+    if (!lowLatency) {
+      sendEvent({ type: "status", message: "⚖️ Critiquing output…" });
+      const critiqueResult = await executeCritique(agentName, fullResponse, "chat conversation", sendEvent);
+      if (critiqueResult && critiqueResult !== fullResponse) {
+        fullResponse = critiqueResult;
+        sendEvent({ type: "critique", text: fullResponse });
+      }
+    }
+
+    sendEvent({ type: "done", result: fullResponse });
+    res.end();
+  } catch (err) {
+    sendEvent({ type: "error", message: err.message });
+    res.end();
   }
 }
 
