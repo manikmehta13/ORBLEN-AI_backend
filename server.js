@@ -6,6 +6,7 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+const crypto = require("crypto");
 const { Readable } = require("stream");
 const { initializeApp: initFirebase, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
