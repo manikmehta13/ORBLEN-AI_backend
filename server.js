@@ -815,19 +815,31 @@ function slideContentToRequests(slides) {
   function parseText(text) {
     let clean = '';
     const spans = [];
-    let i = 0;
-    while (i < text.length) {
-      if (text.slice(i, i + 2) === '**') {
-        const e = text.indexOf('**', i + 2);
-        if (e !== -1) { const s = clean.length; clean += text.slice(i + 2, e); spans.push({ start: s, end: clean.length, bold: true }); i = e + 2; continue; }
+    const lines = text.split('\n');
+    for (const raw of lines) {
+      let line = raw;
+      // strip heading markers
+      line = line.replace(/^#{1,3}\s+/, '');
+      // strip bullet markers
+      line = line.replace(/^[-*]\s+/, '');
+      // strip numbered list markers
+      line = line.replace(/^\d+[.)]\s+/, '');
+      // re-process inline bold/italic on the cleaned line
+      let i = 0;
+      while (i < line.length) {
+        if (line.slice(i, i + 2) === '**') {
+          const e = line.indexOf('**', i + 2);
+          if (e !== -1) { const s = clean.length; clean += line.slice(i + 2, e); spans.push({ start: s, end: clean.length, bold: true }); i = e + 2; continue; }
+        }
+        if (line[i] === '*' && line.slice(i, i + 2) !== '**') {
+          const e = line.indexOf('*', i + 1);
+          if (e !== -1 && line.slice(e, e + 2) !== '**') { const s = clean.length; clean += line.slice(i + 1, e); spans.push({ start: s, end: clean.length, italic: true }); i = e + 1; continue; }
+        }
+        clean += line[i]; i++;
       }
-      if (text[i] === '*' && text.slice(i, i + 2) !== '**') {
-        const e = text.indexOf('*', i + 1);
-        if (e !== -1 && text.slice(e, e + 2) !== '**') { const s = clean.length; clean += text.slice(i + 1, e); spans.push({ start: s, end: clean.length, italic: true }); i = e + 1; continue; }
-      }
-      clean += text[i]; i++;
+      clean += '\n';
     }
-    return { clean, spans };
+    return { clean: clean.replace(/\n$/, ''), spans };
   }
   slides.forEach((text, idx) => {
     const slideId = `nx_slide_${idx}`;
