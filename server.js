@@ -700,7 +700,16 @@ app.post("/api/docs/write", async (req, res) => {
     const token = await getDocsAccessToken(uid);
     const requests = [];
     if (mode === "replace") {
-      requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: 999999999 } } });
+      // Fetch document first to get the actual end index
+      const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const docData = await docRes.json();
+      if (!docRes.ok) throw new Error(docData.error?.message || `Docs API error (${docRes.status})`);
+      const endIdx = docData.body?.content?.[docData.body.content.length - 1]?.endIndex;
+      if (endIdx && endIdx > 1) {
+        requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex } } });
+      }
     }
     requests.push(...markdownToDocsRequests(content));
     const writeRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}:batchUpdate`, {
@@ -711,6 +720,47 @@ app.post("/api/docs/write", async (req, res) => {
     const data = await writeRes.json();
     if (!writeRes.ok) throw new Error(data.error?.message || `Docs API error (${writeRes.status})`);
     res.json({ written: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 8: Delete a document (move to trash) ──
+app.post("/api/docs/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getDocsAccessToken(uid);
+    const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!delRes.ok) {
+      const errData = await delRes.json().catch(() => ({}));
+      throw new Error(errData.error?.message || `Drive API error (${delRes.status})`);
+    }
+    res.json({ deleted: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 9: Rename a document ──
+app.post("/api/docs/rename", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, title } = req.body;
+    if (!id || !title) return res.status(400).json({ error: "id and title required" });
+    const token = await getDocsAccessToken(uid);
+    const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: title })
+    });
+    const data = await renameRes.json();
+    if (!renameRes.ok) throw new Error(data.error?.message || `Drive API error (${renameRes.status})`);
+    res.json({ renamed: true, id: data.id, title: data.name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
