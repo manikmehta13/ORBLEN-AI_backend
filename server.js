@@ -767,6 +767,267 @@ app.post("/api/docs/rename", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  📽 GOOGLE SLIDES API
+// ══════════════════════════════════════════════════════════════
+
+const slidesStates = new Map();
+const SLIDES_REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI || '').replace('/gmail/', '/slides/');
+
+async function getSlidesTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/slides`).once("value");
+  return snap.val() || null;
+}
+async function setSlidesTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/slides`).set(tokens);
+}
+async function refreshSlidesTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Slides token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setSlidesTokens(uid, tokens);
+  return tokens;
+}
+async function getSlidesAccessToken(uid) {
+  const tokens = await getSlidesTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Google Slides not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshSlidesTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+function slideContentToRequests(slides) {
+  if (typeof slides === 'string') {
+    slides = slides.split(/\n?---\n?/).map(s => s.trim()).filter(Boolean);
+  }
+  if (!Array.isArray(slides) || !slides.length) return [];
+  const requests = [];
+  // parse inline markdown (bold/italic) from text, return clean text + style spans
+  function parseText(text) {
+    let clean = '';
+    const spans = [];
+    let i = 0;
+    while (i < text.length) {
+      if (text.slice(i, i + 2) === '**') {
+        const e = text.indexOf('**', i + 2);
+        if (e !== -1) { const s = clean.length; clean += text.slice(i + 2, e); spans.push({ start: s, end: clean.length, bold: true }); i = e + 2; continue; }
+      }
+      if (text[i] === '*' && text.slice(i, i + 2) !== '**') {
+        const e = text.indexOf('*', i + 1);
+        if (e !== -1 && text.slice(e, e + 2) !== '**') { const s = clean.length; clean += text.slice(i + 1, e); spans.push({ start: s, end: clean.length, italic: true }); i = e + 1; continue; }
+      }
+      clean += text[i]; i++;
+    }
+    return { clean, spans };
+  }
+  slides.forEach((text, idx) => {
+    const slideId = `nx_slide_${idx}`;
+    const shapeId = `nx_shape_${idx}`;
+    requests.push({ createSlide: { objectId: slideId, insertionIndex: idx, slideLayoutReference: { predefinedLayout: "BLANK" } } });
+    requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30 } } } });
+    const { clean, spans } = parseText(text);
+    if (clean) {
+      requests.push({ insertText: { objectId: shapeId, text: clean, insertionIndex: 0 } });
+      spans.forEach(sp => {
+        const st = {};
+        if (sp.bold) st.bold = true;
+        if (sp.italic) st.italic = true;
+        requests.push({ updateTextStyle: { objectId: shapeId, style: st, fields: Object.keys(st).join(','), textRange: { type: "FIXED_RANGE", startIndex: sp.start, endIndex: sp.end } } });
+      });
+    }
+  });
+  return requests;
+}
+
+// ── Slides Step 1: OAuth URL ──
+app.get("/api/slides/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    slidesStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/drive";
+    res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(SLIDES_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent` });
+  } catch (err) { res.status(401).json({ error: err.message }); }
+});
+
+// ── Slides Step 2: OAuth callback ──
+app.get("/api/slides/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = slidesStates.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  slidesStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: SLIDES_REDIRECT_URI, grant_type: "authorization_code" })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setSlidesTokens(stored.uid, tokens);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8888"}?slides=connected`);
+  } catch (err) { res.status(500).send("Slides OAuth failed: " + err.message); }
+});
+
+// ── Slides Step 3: Check status ──
+app.get("/api/slides/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getSlidesTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch { res.json({ connected: false, expiresAt: 0 }); }
+});
+
+// ── Slides Step 4: List via Drive API ──
+app.post("/api/slides/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { query, maxResults } = req.body;
+    const token = await getSlidesAccessToken(uid);
+    const q = encodeURIComponent(query ? `name contains '${query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.presentation'` : "mimeType='application/vnd.google-apps.presentation'");
+    const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await listRes.json();
+    if (!listRes.ok) throw new Error(data.error?.message || `Drive API error (${listRes.status})`);
+    res.json({ files: (data.files || []).map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime, modifiedTime: f.modifiedTime, owner: f.owners?.[0]?.displayName || "" })) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Slides Step 5: Read presentation ──
+app.post("/api/slides/read", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getSlidesAccessToken(uid);
+    const readRes = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await readRes.json();
+    if (!readRes.ok) throw new Error(data.error?.message || `Slides API error (${readRes.status})`);
+    const slides = (data.slides || []).map(slide => {
+      const texts = (slide.pageElements || [])
+        .filter(el => el.shape?.text?.textElements)
+        .flatMap(el => el.shape.text.textElements
+          .filter(te => te.textRun?.content)
+          .map(te => te.textRun.content)
+        );
+      return { objectId: slide.objectId, text: texts.join('') };
+    });
+    res.json({ id: data.presentationId, title: data.title || "", slideCount: slides.length, slides });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Slides Step 6: Create presentation ──
+app.post("/api/slides/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { title, slides } = req.body;
+    if (!title) return res.status(400).json({ error: "title required" });
+    const token = await getSlidesAccessToken(uid);
+    const createRes = await fetch("https://slides.googleapis.com/v1/presentations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title })
+    });
+    const data = await createRes.json();
+    if (!createRes.ok) throw new Error(data.error?.message || `Slides API error (${createRes.status})`);
+    const requests = slideContentToRequests(slides);
+    if (requests.length) {
+      const batchRes = await fetch(`https://slides.googleapis.com/v1/presentations/${data.presentationId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests })
+      });
+      if (!batchRes.ok) {
+        const errData = await batchRes.json().catch(() => ({}));
+        throw new Error("Slide creation failed: " + (errData.error?.message || batchRes.statusText));
+      }
+    }
+    res.json({ created: true, id: data.presentationId, title: data.title || title, url: `https://docs.google.com/presentation/d/${data.presentationId}/edit`, slideCount: (slides ? (Array.isArray(slides) ? slides.length : slides.split(/\n?---\n?/).filter(Boolean).length) : 0) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Slides Step 7: Write / add slides ──
+app.post("/api/slides/write", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, slides, mode } = req.body;
+    if (!id || !slides) return res.status(400).json({ error: "id and slides required" });
+    const token = await getSlidesAccessToken(uid);
+    const requests = [];
+    if (mode === "replace") {
+      // Fetch presentation to find existing slide IDs
+      const presRes = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const presData = await presRes.json();
+      if (!presRes.ok) throw new Error(presData.error?.message || `Slides API error (${presRes.status})`);
+      (presData.slides || []).forEach(s => {
+        requests.push({ deleteObject: { objectId: s.objectId } });
+      });
+    }
+    requests.push(...slideContentToRequests(slides));
+    if (requests.length) {
+      const batchRes = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(id)}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests })
+      });
+      const data = await batchRes.json();
+      if (!batchRes.ok) throw new Error(data.error?.message || `Slides API error (${batchRes.status})`);
+    }
+    res.json({ written: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Slides Step 8: Delete ──
+app.post("/api/slides/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getSlidesAccessToken(uid);
+    const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!delRes.ok) { const errData = await delRes.json().catch(() => ({})); throw new Error(errData.error?.message || `Drive API error (${delRes.status})`); }
+    res.json({ deleted: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Slides Step 9: Rename ──
+app.post("/api/slides/rename", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, title } = req.body;
+    if (!id || !title) return res.status(400).json({ error: "id and title required" });
+    const token = await getSlidesAccessToken(uid);
+    const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: title })
+    });
+    const data = await renameRes.json();
+    if (!renameRes.ok) throw new Error(data.error?.message || `Drive API error (${renameRes.status})`);
+    res.json({ renamed: true, id: data.id, title: data.name });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -2714,7 +2975,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs" : "❌ Gmail / Docs",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides" : "❌ Gmail / Docs / Slides",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
