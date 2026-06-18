@@ -4371,6 +4371,40 @@ app.post("/api/tasks/pause", async (req, res) => {
   }
 });
 
+// ── executeSingleTask: run one task (LLM + marker processing + state update) ──
+async function executeSingleTask(uid, taskId, task) {
+  const now = Date.now();
+  const history = task.conversationHistory || [];
+  const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
+  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${contextStr}` };
+  const userMsg = task.type === 'continuous'
+    ? { role: 'user', content: `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?` }
+    : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
+  const messages = [systemMsg, ...history.slice(-10), userMsg];
+
+  const llmResponse = await callModelBackend(task.agent, messages);
+  const { cleanText } = await processMarkers(llmResponse, uid);
+
+  const isComplete = cleanText.includes('[TASK_COMPLETE]') || cleanText.includes('✅ Task complete');
+  const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
+  const nextRun = task.type === 'continuous'
+    ? (isComplete ? 0 : now + (task.interval || 7200000))
+    : parseNextRun(task.schedule);
+
+  const updates = {
+    lastRun: now,
+    nextRun: isComplete ? 0 : nextRun,
+    totalRuns: (task.totalRuns || 0) + 1,
+    conversationHistory: newConversationHistory.slice(-50),
+    updatedAt: now
+  };
+  if (isComplete) updates.status = 'completed';
+
+  await gmailDb().ref(`tasks/${uid}/${taskId}`).update(updates);
+  console.log(`⏰ Task executed: ${uid.slice(0,8)} / ${taskId.slice(0,12)} / ${isComplete ? 'completed' : 'ran'}`);
+  return { uid, taskId, status: isComplete ? 'completed' : 'executed', cleanText };
+}
+
 // ── executeDueTasks: check and execute all due tasks ──
 async function executeDueTasks() {
   const now = Date.now();
@@ -4389,35 +4423,7 @@ async function executeDueTasks() {
         }
 
         try {
-          const history = task.conversationHistory || [];
-          const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-          const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${contextStr}` };
-          const userMsg = task.type === 'continuous'
-            ? { role: 'user', content: `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?` }
-            : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
-          const messages = [systemMsg, ...history.slice(-10), userMsg];
-
-          const llmResponse = await callModelBackend(task.agent, messages);
-          const { cleanText } = await processMarkers(llmResponse, uid);
-
-          const isComplete = cleanText.includes('[TASK_COMPLETE]') || cleanText.includes('✅ Task complete');
-          const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
-          const nextRun = task.type === 'continuous'
-            ? (isComplete ? 0 : now + (task.interval || 7200000))
-            : parseNextRun(task.schedule);
-
-          const updates = {
-            lastRun: now,
-            nextRun: isComplete ? 0 : nextRun,
-            totalRuns: (task.totalRuns || 0) + 1,
-            conversationHistory: newConversationHistory.slice(-50),
-            updatedAt: now
-          };
-          if (isComplete) updates.status = 'completed';
-
-          await gmailDb().ref(`tasks/${uid}/${taskId}`).update(updates);
-          executed.push({ uid, taskId, status: isComplete ? 'completed' : 'executed' });
-          console.log(`⏰ Task executed: ${uid.slice(0,8)} / ${taskId.slice(0,12)} / ${isComplete ? 'completed' : 'ran'}`);
+          executed.push(await executeSingleTask(uid, taskId, task));
         } catch (taskErr) {
           console.error(`⏰ Task ${taskId} (${uid}) failed:`, taskErr.message);
           await gmailDb().ref(`tasks/${uid}/${taskId}/lastRun`).set(now);
@@ -4432,6 +4438,22 @@ async function executeDueTasks() {
 
   return executed;
 }
+
+// ── Run Now: execute a specific task immediately ──
+app.post("/api/tasks/run", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { taskId } = req.body;
+    if (!taskId) return res.status(400).json({ error: "taskId required" });
+    const snap = await gmailDb().ref(`tasks/${uid}/${taskId}`).once("value");
+    const task = snap.val();
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    const result = await executeSingleTask(uid, taskId, task);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Tick: called by cron-job.org every 2 hours (idle coverage) ──
 app.post("/api/tasks/tick", async (req, res) => {
