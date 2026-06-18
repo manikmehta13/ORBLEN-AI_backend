@@ -79,6 +79,17 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '15mb' }));
 
+// ── Piggyback: after any authenticated request, check for due tasks ──
+// This catches tasks in real-time when the user is active.
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode < 400 && req.headers.authorization?.startsWith('Bearer ')) {
+      executeDueTasks();
+    }
+  });
+  next();
+});
+
 app.get("/robots.txt", (req, res) => {
   res.type("text/plain").send("User-agent: *\nDisallow: /\n");
 });
@@ -4360,21 +4371,12 @@ app.post("/api/tasks/pause", async (req, res) => {
   }
 });
 
-// ── Tick: called by external cron every 2 hours — executes due tasks ──
-app.post("/api/tasks/tick", async (req, res) => {
-  // Optional simple auth check via a shared secret
-  const authHeader = req.headers.authorization;
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const provided = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    if (provided !== cronSecret) return res.status(401).json({ error: "Unauthorized" });
-  }
+// ── executeDueTasks: check and execute all due tasks ──
+async function executeDueTasks() {
+  const now = Date.now();
+  const executed = [];
 
   try {
-    const now = Date.now();
-    const executed = [];
-
-    // Fetch all tasks across all users
     const allTasksSnap = await gmailDb().ref('tasks').once('value');
     const allUsersTasks = allTasksSnap.val() || {};
 
@@ -4387,7 +4389,6 @@ app.post("/api/tasks/tick", async (req, res) => {
         }
 
         try {
-          // Build LLM prompt from task configuration
           const history = task.conversationHistory || [];
           const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
           const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${contextStr}` };
@@ -4396,44 +4397,51 @@ app.post("/api/tasks/tick", async (req, res) => {
             : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
           const messages = [systemMsg, ...history.slice(-10), userMsg];
 
-          // Call the LLM
           const llmResponse = await callModelBackend(task.agent, messages);
-
-          // Process markers in the response
           const { cleanText } = await processMarkers(llmResponse, uid);
 
-          // Check if task is complete
           const isComplete = cleanText.includes('[TASK_COMPLETE]') || cleanText.includes('✅ Task complete');
           const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
           const nextRun = task.type === 'continuous'
             ? (isComplete ? 0 : now + (task.interval || 7200000))
             : parseNextRun(task.schedule);
 
-          // Update task state
           const updates = {
             lastRun: now,
             nextRun: isComplete ? 0 : nextRun,
             totalRuns: (task.totalRuns || 0) + 1,
-            conversationHistory: newConversationHistory.slice(-50), // keep last 50
+            conversationHistory: newConversationHistory.slice(-50),
             updatedAt: now
           };
           if (isComplete) updates.status = 'completed';
 
           await gmailDb().ref(`tasks/${uid}/${taskId}`).update(updates);
           executed.push({ uid, taskId, status: isComplete ? 'completed' : 'executed' });
+          console.log(`⏰ Task executed: ${uid.slice(0,8)} / ${taskId.slice(0,12)} / ${isComplete ? 'completed' : 'ran'}`);
         } catch (taskErr) {
-          console.error(`Task ${taskId} (${uid}) failed:`, taskErr.message);
+          console.error(`⏰ Task ${taskId} (${uid}) failed:`, taskErr.message);
           await gmailDb().ref(`tasks/${uid}/${taskId}/lastRun`).set(now);
-          await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + 7200000); // retry in 2h
+          await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + 7200000);
           executed.push({ uid, taskId, status: 'failed', error: taskErr.message });
         }
       }
     }
-
-    res.json({ ticked: true, timestamp: now, executed });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('⏰ executeDueTasks error:', err.message);
   }
+
+  return executed;
+}
+
+// ── Tick: called by cron-job.org every 2 hours (idle coverage) ──
+app.post("/api/tasks/tick", async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const provided = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
+    if (provided !== cronSecret) return res.status(401).json({ error: "Unauthorized" });
+  }
+  const executed = await executeDueTasks();
+  res.json({ ticked: true, timestamp: Date.now(), executed });
 });
 
 const PORT = process.env.PORT || 4000;
