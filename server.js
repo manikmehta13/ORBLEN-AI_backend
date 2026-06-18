@@ -1040,6 +1040,213 @@ app.post("/api/slides/rename", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  📊 GOOGLE SHEETS API
+// ══════════════════════════════════════════════════════════════
+
+const sheetsStates = new Map();
+const SHEETS_REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI || '').replace('/gmail/', '/sheets/');
+
+async function getSheetsTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/sheets`).once("value");
+  return snap.val() || null;
+}
+async function setSheetsTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/sheets`).set(tokens);
+}
+async function refreshSheetsTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Sheets token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setSheetsTokens(uid, tokens);
+  return tokens;
+}
+async function getSheetsAccessToken(uid) {
+  const tokens = await getSheetsTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Google Sheets not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshSheetsTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+// ── Sheets Step 1: OAuth URL ──
+app.get("/api/sheets/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    sheetsStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive";
+    res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(SHEETS_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent` });
+  } catch (err) { res.status(401).json({ error: err.message }); }
+});
+
+// ── Sheets Step 2: OAuth callback ──
+app.get("/api/sheets/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = sheetsStates.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  sheetsStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: SHEETS_REDIRECT_URI, grant_type: "authorization_code" })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setSheetsTokens(stored.uid, tokens);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8888"}?sheets=connected`);
+  } catch (err) { res.status(500).send("Sheets OAuth failed: " + err.message); }
+});
+
+// ── Sheets Step 3: Check status ──
+app.get("/api/sheets/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getSheetsTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch { res.json({ connected: false, expiresAt: 0 }); }
+});
+
+// ── Sheets Step 4: List via Drive API ──
+app.post("/api/sheets/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { query, maxResults } = req.body;
+    const token = await getSheetsAccessToken(uid);
+    const q = encodeURIComponent(query ? `name contains '${query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet'` : "mimeType='application/vnd.google-apps.spreadsheet'");
+    const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await listRes.json();
+    if (!listRes.ok) throw new Error(data.error?.message || `Drive API error (${listRes.status})`);
+    res.json({ files: (data.files || []).map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime, modifiedTime: f.modifiedTime, owner: f.owners?.[0]?.displayName || "" })) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Sheets Step 5: Read cell values ──
+app.post("/api/sheets/read", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, range } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getSheetsAccessToken(uid);
+    const rangeEnc = encodeURIComponent(range || "A1:ZZ");
+    const readRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${rangeEnc}?majorDimension=ROWS`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await readRes.json();
+    if (!readRes.ok) throw new Error(data.error?.message || `Sheets API error (${readRes.status})`);
+    res.json({ id, range: data.range || range, values: data.values || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Sheets Step 6: Create spreadsheet ──
+app.post("/api/sheets/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { title, data } = req.body;
+    if (!title) return res.status(400).json({ error: "title required" });
+    const token = await getSheetsAccessToken(uid);
+    const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ properties: { title } })
+    });
+    const created = await createRes.json();
+    if (!createRes.ok) throw new Error(created.error?.message || `Sheets API error (${createRes.status})`);
+    const sheetId = created.spreadsheetId;
+    // If data provided, write it starting at A1
+    if (data && Array.isArray(data) && data.length) {
+      const rangeEnc = encodeURIComponent("A1");
+      const writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rangeEnc}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ values: data, majorDimension: "ROWS" })
+      });
+      if (!writeRes.ok) {
+        const errData = await writeRes.json().catch(() => ({}));
+        throw new Error("Sheet created but data write failed: " + (errData.error?.message || writeRes.statusText));
+      }
+    }
+    res.json({ created: true, id: sheetId, title, url: `https://docs.google.com/spreadsheets/d/${sheetId}/edit` });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Sheets Step 7: Write / append data ──
+app.post("/api/sheets/write", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, range, values, mode } = req.body;
+    if (!id || !values) return res.status(400).json({ error: "id and values required" });
+    const token = await getSheetsAccessToken(uid);
+    const rangeEnc = encodeURIComponent(range || "A1");
+    let writeRes;
+    if (mode === "append") {
+      writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${rangeEnc}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ values, majorDimension: "ROWS" })
+      });
+    } else {
+      writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}/values/${rangeEnc}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ values, majorDimension: "ROWS" })
+      });
+    }
+    const writeData = await writeRes.json();
+    if (!writeRes.ok) throw new Error(writeData.error?.message || `Sheets API error (${writeRes.status})`);
+    res.json({ written: true, id, updatedCells: writeData.updatedCells || 0 });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Sheets Step 8: Delete ──
+app.post("/api/sheets/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getSheetsAccessToken(uid);
+    const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!delRes.ok) { const errData = await delRes.json().catch(() => ({})); throw new Error(errData.error?.message || `Drive API error (${delRes.status})`); }
+    res.json({ deleted: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Sheets Step 9: Rename ──
+app.post("/api/sheets/rename", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, title } = req.body;
+    if (!id || !title) return res.status(400).json({ error: "id and title required" });
+    const token = await getSheetsAccessToken(uid);
+    const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: title })
+    });
+    const data = await renameRes.json();
+    if (!renameRes.ok) throw new Error(data.error?.message || `Drive API error (${renameRes.status})`);
+    res.json({ renamed: true, id: data.id, title: data.name });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -2987,7 +3194,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides" : "❌ Gmail / Docs / Slides",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides + Sheets" : "❌ Gmail / Docs / Slides / Sheets",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
