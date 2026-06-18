@@ -1247,6 +1247,194 @@ app.post("/api/sheets/rename", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  📅 GOOGLE CALENDAR API
+// ══════════════════════════════════════════════════════════════
+
+const calendarStates = new Map();
+const CALENDAR_REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI || '').replace('/gmail/', '/calendar/');
+
+async function getCalendarTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/calendar`).once("value");
+  return snap.val() || null;
+}
+async function setCalendarTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/calendar`).set(tokens);
+}
+async function refreshCalendarTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Calendar token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setCalendarTokens(uid, tokens);
+  return tokens;
+}
+async function getCalendarAccessToken(uid) {
+  const tokens = await getCalendarTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Google Calendar not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshCalendarTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+const CAL_API = "https://www.googleapis.com/calendar/v3";
+
+// ── Calendar Step 1: OAuth URL ──
+app.get("/api/calendar/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    calendarStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/calendar.events";
+    res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(CALENDAR_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent` });
+  } catch (err) { res.status(401).json({ error: err.message }); }
+});
+
+// ── Calendar Step 2: OAuth callback ──
+app.get("/api/calendar/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = calendarStates.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  calendarStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: CALENDAR_REDIRECT_URI, grant_type: "authorization_code" })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setCalendarTokens(stored.uid, tokens);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8888"}?calendar=connected`);
+  } catch (err) { res.status(500).send("Calendar OAuth failed: " + err.message); }
+});
+
+// ── Calendar Step 3: Check status ──
+app.get("/api/calendar/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getCalendarTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch { res.json({ connected: false, expiresAt: 0 }); }
+});
+
+// ── Calendar Step 4: List upcoming events ──
+app.post("/api/calendar/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { maxResults, timeMin, timeMax } = req.body;
+    const token = await getCalendarAccessToken(uid);
+    const params = new URLSearchParams({ orderBy: "startTime", singleEvents: "true", maxResults: String(Math.min(maxResults || 10, 50)) });
+    if (timeMin) params.set("timeMin", timeMin);
+    if (timeMax) params.set("timeMax", timeMax);
+    const listRes = await fetch(`${CAL_API}/calendars/primary/events?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await listRes.json();
+    if (!listRes.ok) throw new Error(data.error?.message || `Calendar API error (${listRes.status})`);
+    res.json({ items: (data.items || []).map(e => ({ id: e.id, summary: e.summary || "(no title)", description: e.description || "", start: e.start, end: e.end, status: e.status, location: e.location || "", hangoutLink: e.hangoutLink || "" })) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Calendar Step 5: Read event ──
+app.post("/api/calendar/read", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getCalendarAccessToken(uid);
+    const readRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await readRes.json();
+    if (!readRes.ok) throw new Error(data.error?.message || `Calendar API error (${readRes.status})`);
+    res.json({ id: data.id, summary: data.summary, description: data.description, start: data.start, end: data.end, status: data.status, location: data.location, hangoutLink: data.hangoutLink, createdAt: data.created, updated: data.updated, creator: data.creator, attendees: data.attendees || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Calendar Step 6: Create event ──
+app.post("/api/calendar/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { summary, description, start, end, location, attendees } = req.body;
+    if (!summary || !start || !end) return res.status(400).json({ error: "summary, start, and end required" });
+    const token = await getCalendarAccessToken(uid);
+    const body = { summary, description: description || "", start, end };
+    if (location) body.location = location;
+    if (attendees) body.attendees = attendees.map(email => ({ email }));
+    const createRes = await fetch(`${CAL_API}/calendars/primary/events`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await createRes.json();
+    if (!createRes.ok) throw new Error(data.error?.message || `Calendar API error (${createRes.status})`);
+    res.json({ created: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Calendar Step 7: Quick add ──
+app.post("/api/calendar/quick-add", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: "text required" });
+    const token = await getCalendarAccessToken(uid);
+    const qaRes = await fetch(`${CAL_API}/calendars/primary/events/quickAdd?text=${encodeURIComponent(text)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await qaRes.json();
+    if (!qaRes.ok) throw new Error(data.error?.message || `Calendar API error (${qaRes.status})`);
+    res.json({ created: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Calendar Step 8: Update event ──
+app.post("/api/calendar/update", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, ...fields } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getCalendarAccessToken(uid);
+    const updRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(fields)
+    });
+    const data = await updRes.json();
+    if (!updRes.ok) throw new Error(data.error?.message || `Calendar API error (${updRes.status})`);
+    res.json({ updated: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Calendar Step 9: Delete event ──
+app.post("/api/calendar/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getCalendarAccessToken(uid);
+    const delRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!delRes.ok) { const errData = await delRes.json().catch(() => ({})); throw new Error(errData.error?.message || `Calendar API error (${delRes.status})`); }
+    res.json({ deleted: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -3194,7 +3382,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides + Sheets" : "❌ Gmail / Docs / Slides / Sheets",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides + Sheets + Calendar" : "❌ Gmail / Docs / Slides / Sheets / Calendar",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
