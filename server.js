@@ -2944,18 +2944,6 @@ async function processMarkers(text, uid) {
           return String(v);
         }
 
-        // Helper to detect duplicates
-        function isDuplicate(wa, existing) {
-          const wordsFn = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
-          for (const mem of Object.values(existing)) {
-            const wb = wordsFn(mem.content || '');
-            const inter = [...wa].filter(w => wb.has(w));
-            const uni = new Set([...wa, ...wb]);
-            if (uni.size > 0 && inter.length / uni.size > 0.55) return true;
-          }
-          return false;
-        }
-
         // Normalize category to match frontend expectations (personal, preference, project, context)
         const CATEGORY_MAP = {
           personal_information: 'personal',
@@ -2978,46 +2966,41 @@ async function processMarkers(text, uid) {
         };
         function normalizeCat(key) { return CATEGORY_MAP[key] || 'context'; }
 
-        let savedCount = 0;
-        let skipCount = 0;
-        const wordsFn = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
-
-        // If payload has a "content" field, store as a flat memory
-        if (p.content) {
-          const content = p.content.trim();
-          const category = p.category || 'context';
-          const wa = wordsFn(content);
-          if (isDuplicate(wa, existing)) {
-            skipCount++;
-          } else {
-            const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-            await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
-            savedCount++;
+        // One category → one memory. Find existing by normalized category and replace it.
+        function replaceOrCreate(rawCat, content) {
+          const category = normalizeCat(rawCat);
+          // Find all existing memories with this normalized category
+          const existingIds = Object.entries(existing)
+            .filter(([, mem]) => (CATEGORY_MAP[mem.category] || mem.category || 'context') === category)
+            .map(([id]) => id);
+          // Delete old entries for this category
+          for (const id of existingIds) {
+            memRef.child(id).remove();
           }
+          // Save new
+          const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+          memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+        }
+
+        let savedCount = 0;
+
+        if (p.content) {
+          // Flat memory: one per category
+          const content = p.content.trim();
+          const rawCat = p.category || 'context';
+          replaceOrCreate(rawCat, content);
+          savedCount++;
         } else {
-          // Structured data: each top-level key becomes a memory
+          // Structured: each top-level key is a category → one memory per key
           for (const [rawCat, data] of Object.entries(p)) {
             if (!data) continue;
             const content = rawCat + ':' + formatMemoryValue(data);
-            const category = normalizeCat(rawCat);
-            const wa = wordsFn(content);
-            if (isDuplicate(wa, existing)) {
-              skipCount++;
-            } else {
-              const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-              await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
-              savedCount++;
-            }
+            replaceOrCreate(rawCat, content);
+            savedCount++;
           }
         }
 
-        if (savedCount > 0 && skipCount > 0) {
-          cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} new, ${skipCount} duplicates skipped)`);
-        } else if (savedCount > 0) {
-          cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} new facts)`);
-        } else {
-          cleanText = cleanText.replace(raw, `🧠 No new memories saved (${skipCount} duplicates skipped)`);
-        }
+        cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} ${savedCount === 1 ? 'fact' : 'facts'})`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
     }
   }}
