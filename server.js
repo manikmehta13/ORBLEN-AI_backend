@@ -504,7 +504,7 @@ app.get("/api/docs/auth-url", async (req, res) => {
     const uid = await getUserUid(req.headers.authorization);
     const state = crypto.randomBytes(32).toString("hex");
     docsStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
-    const scopes = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.metadata.readonly";
+    const scopes = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive";
     res.json({
       url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(DOCS_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent`
     });
