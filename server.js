@@ -2337,7 +2337,8 @@ async function processMarkers(text, uid) {
               });
             }
           }
-          cleanText = cleanText.replace(raw, `✅ Document created: "${data.title || p.title}" (ID: ${docId})`);
+          const docUrl = `https://docs.google.com/document/d/${docId}`;
+          cleanText = cleanText.replace(raw, `[✅ Document created: "${data.title || p.title}"](https://docs.google.com/document/d/${docId})`);
         } else {
           cleanText = cleanText.replace(raw, `⚠ Docs create failed: ${data.error?.message || createRes.statusText}`);
         }
@@ -2501,7 +2502,8 @@ async function processMarkers(text, uid) {
               });
             }
           }
-          cleanText = cleanText.replace(raw, `✅ Presentation created: "${data.title || p.title}" (ID: ${data.presentationId}, ${slideCount} slides)`);
+          const slidesUrl = `https://docs.google.com/presentation/d/${data.presentationId}`;
+          cleanText = cleanText.replace(raw, `[✅ Presentation created: "${data.title || p.title}" (${slideCount} slides)](${slidesUrl})`);
         } else {
           cleanText = cleanText.replace(raw, `⚠ Slides create failed: ${data.error?.message || createRes.statusText}`);
         }
@@ -2650,7 +2652,8 @@ async function processMarkers(text, uid) {
               body: JSON.stringify({ values: p.data, majorDimension: "ROWS" })
             });
           }
-          cleanText = cleanText.replace(raw, `✅ Spreadsheet created: "${data.properties?.title || p.title}" (ID: ${data.spreadsheetId})`);
+          const sheetsUrl = `https://docs.google.com/spreadsheets/d/${data.spreadsheetId}`;
+          cleanText = cleanText.replace(raw, `[✅ Spreadsheet created: "${data.properties?.title || p.title}"](${sheetsUrl})`);
         } else {
           cleanText = cleanText.replace(raw, `⚠ Sheets create failed: ${data.error?.message || createRes.statusText}`);
         }
