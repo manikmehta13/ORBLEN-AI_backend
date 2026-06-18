@@ -411,6 +411,24 @@ app.post("/api/gmail/search", async (req, res) => {
   }
 });
 
+// ── Email body cleanup — strip CSS/HTML that some senders put in text/plain ──
+function cleanEmailBody(body) {
+  if (!body) return body;
+  // Remove @media blocks
+  body = body.replace(/@media\s*[^{]*\{[^}]*\}/gs, '');
+  // Remove CSS rules: anything like "selector { ... }"
+  body = body.replace(/[.#a-zA-Z@][\w\s,#.\-:*>+~[\]()=^$|]+\s*\{[^}]*\}/gs, '');
+  // Remove inline style tags
+  body = body.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  // Remove HTML tags
+  body = body.replace(/<[^>]+>/g, '');
+  // Decode common HTML entities
+  body = body.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  // Collapse multiple blank lines
+  body = body.replace(/\n{3,}/g, '\n\n');
+  return body.trim();
+}
+
 // ── Step 6: Read a specific email ──
 app.post("/api/gmail/read", async (req, res) => {
   try {
@@ -429,7 +447,7 @@ app.post("/api/gmail/read", async (req, res) => {
       const p = parts.shift();
       if (p.parts) parts.push(...p.parts);
       if (p.mimeType === "text/plain" && p.body?.data) {
-        return res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: Buffer.from(p.body.data, "base64").toString("utf-8") });
+        return res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: cleanEmailBody(Buffer.from(p.body.data, "base64").toString("utf-8")) });
       }
     }
     res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: "(no plain text body found)" });
