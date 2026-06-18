@@ -2077,6 +2077,721 @@ If NO, output EXACTLY ONE new, improved search query to find the missing informa
   return webContext;
 }
 
+// ══════════════════════════════════════════════════════════════
+//  🏭 Backend Marker Processor — executes all 27 marker types
+//  Called after LLM streaming completes, and by the task scheduler
+// ══════════════════════════════════════════════════════════════
+const MARKER_RE = {
+  GMAIL_SEND:      /\[GMAIL_SEND\](.*?)\[\/GMAIL_SEND\]/gs,
+  GMAIL_SEARCH:    /\[GMAIL_SEARCH\](.*?)\[\/GMAIL_SEARCH\]/gs,
+  GMAIL_READ:      /\[GMAIL_READ\](.*?)\[\/GMAIL_READ\]/gs,
+  DOCS_LIST:       /\[DOCS_LIST\](.*?)\[\/DOCS_LIST\]/gs,
+  DOCS_READ:       /\[DOCS_READ\](.*?)\[\/DOCS_READ\]/gs,
+  DOCS_CREATE:     /\[DOCS_CREATE\](.*?)\[\/DOCS_CREATE\]/gs,
+  DOCS_WRITE:      /\[DOCS_WRITE\](.*?)\[\/DOCS_WRITE\]/gs,
+  DOCS_DELETE:     /\[DOCS_DELETE\](.*?)\[\/DOCS_DELETE\]/gs,
+  DOCS_RENAME:     /\[DOCS_RENAME\](.*?)\[\/DOCS_RENAME\]/gs,
+  SLIDES_LIST:     /\[SLIDES_LIST\](.*?)\[\/SLIDES_LIST\]/gs,
+  SLIDES_READ:     /\[SLIDES_READ\](.*?)\[\/SLIDES_READ\]/gs,
+  SLIDES_CREATE:   /\[SLIDES_CREATE\](.*?)\[\/SLIDES_CREATE\]/gs,
+  SLIDES_WRITE:    /\[SLIDES_WRITE\](.*?)\[\/SLIDES_WRITE\]/gs,
+  SLIDES_DELETE:   /\[SLIDES_DELETE\](.*?)\[\/SLIDES_DELETE\]/gs,
+  SLIDES_RENAME:   /\[SLIDES_RENAME\](.*?)\[\/SLIDES_RENAME\]/gs,
+  SHEETS_LIST:     /\[SHEETS_LIST\](.*?)\[\/SHEETS_LIST\]/gs,
+  SHEETS_READ:     /\[SHEETS_READ\](.*?)\[\/SHEETS_READ\]/gs,
+  SHEETS_CREATE:   /\[SHEETS_CREATE\](.*?)\[\/SHEETS_CREATE\]/gs,
+  SHEETS_WRITE:    /\[SHEETS_WRITE\](.*?)\[\/SHEETS_WRITE\]/gs,
+  SHEETS_DELETE:   /\[SHEETS_DELETE\](.*?)\[\/SHEETS_DELETE\]/gs,
+  SHEETS_RENAME:   /\[SHEETS_RENAME\](.*?)\[\/SHEETS_RENAME\]/gs,
+  CALENDAR_LIST:   /\[CALENDAR_LIST\](.*?)\[\/CALENDAR_LIST\]/gs,
+  CALENDAR_READ:   /\[CALENDAR_READ\](.*?)\[\/CALENDAR_READ\]/gs,
+  CALENDAR_CREATE: /\[CALENDAR_CREATE\](.*?)\[\/CALENDAR_CREATE\]/gs,
+  CALENDAR_QUICK_ADD: /\[CALENDAR_QUICK_ADD\](.*?)\[\/CALENDAR_QUICK_ADD\]/gs,
+  CALENDAR_UPDATE: /\[CALENDAR_UPDATE\](.*?)\[\/CALENDAR_UPDATE\]/gs,
+  CALENDAR_DELETE: /\[CALENDAR_DELETE\](.*?)\[\/CALENDAR_DELETE\]/gs,
+};
+
+async function processMarkers(text, uid) {
+  if (!text || !uid) return { cleanText: text || '' };
+  let cleanText = text;
+
+  // ── GMAIL_SEND ──
+  { let m; while ((m = MARKER_RE.GMAIL_SEND.exec(text)) !== null) {
+    const raw = m[0], idx = m.index;
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.to && p.subject && p.body) {
+      try {
+        const token = await getGmailAccessToken(uid);
+        const email = [`From: me`,`To: ${p.to}`,`Subject: ${p.subject}`,`MIME-Version: 1.0`,`Content-Type: text/plain; charset=UTF-8`,"",p.body].join("\r\n");
+        const raw64 = Buffer.from(email).toString("base64url");
+        const sendRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ raw: raw64 })
+        });
+        const d = await sendRes.json();
+        if (sendRes.ok) cleanText = cleanText.replace(raw, `✅ Email sent to ${p.to} (subject: ${p.subject})`);
+        else cleanText = cleanText.replace(raw, `⚠ Gmail send failed: ${d.error?.message || sendRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Gmail send error: ${e.message}`); }
+    }
+  }}
+
+  // ── GMAIL_SEARCH ──
+  { let m; while ((m = MARKER_RE.GMAIL_SEARCH.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.query) {
+      try {
+        const token = await getGmailAccessToken(uid);
+        const searchRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(p.query)}&maxResults=${Math.min(p.maxResults || 10, 50)}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await searchRes.json();
+        if (searchRes.ok && data.messages?.length) {
+          const details = (await Promise.all(data.messages.slice(0, 10).map(async (msg) => {
+            try {
+              const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+                headers: { Authorization: `Bearer ${token}` }
+              });
+              const d = await r.json();
+              const hdrs = (d.payload?.headers || []).reduce((a, h) => { a[h.name] = h.value; return a; }, {});
+              return `[ID:${msg.id}] From: ${hdrs.From || ''} | Subject: ${hdrs.Subject || ''} | Date: ${hdrs.Date || ''} | Snippet: ${(d.snippet || '').slice(0, 100)}`;
+            } catch { return null; }
+          }))).filter(Boolean).join('\n');
+          cleanText = cleanText.replace(raw, `📧 Gmail search results for "${p.query}":\n${details}`);
+        } else {
+          cleanText = cleanText.replace(raw, `📧 No emails found for "${p.query}"`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Gmail search error: ${e.message}`); }
+    }
+  }}
+
+  // ── GMAIL_READ ──
+  { let m; while ((m = MARKER_RE.GMAIL_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getGmailAccessToken(uid);
+        const readRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(p.id || p.eventId)}?format=full`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await readRes.json();
+        if (readRes.ok) {
+          const hdrs = (data.payload?.headers || []).reduce((a, h) => { a[h.name] = h.value; return a; }, {});
+          const parts = [data.payload];
+          let body = '(no plain text body found)';
+          while (parts.length) {
+            const pp = parts.shift();
+            if (pp.parts) parts.push(...pp.parts);
+            if (pp.mimeType === 'text/plain' && pp.body?.data) { body = Buffer.from(pp.body.data, 'base64').toString('utf-8'); break; }
+          }
+          cleanText = cleanText.replace(raw, `📧 Email from: ${hdrs.From || ''}\nSubject: ${hdrs.Subject || ''}\nDate: ${hdrs.Date || ''}\n\n${body.slice(0, 2000)}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Gmail read failed: ${data.error?.message || readRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Gmail read error: ${e.message}`); }
+    }
+  }}
+
+  // ── DOCS_LIST ──
+  { let m; while ((m = MARKER_RE.DOCS_LIST.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    try {
+      const token = await getDocsAccessToken(uid);
+      const q = encodeURIComponent(p?.query
+        ? `name contains '${p.query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.document'`
+        : "mimeType='application/vnd.google-apps.document'");
+      const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(p?.maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await listRes.json();
+      if (listRes.ok && data.files?.length) {
+        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Modified: ${f.modifiedTime || ''} | Owner: ${f.owners?.[0]?.displayName || ''}`).join('\n');
+        cleanText = cleanText.replace(raw, `📝 Documents (${data.files.length}):\n${details}`);
+      } else {
+        cleanText = cleanText.replace(raw, `📝 No documents found${p?.query ? ' for "' + p.query + '"' : ''}`);
+      }
+    } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs list error: ${e.message}`); }
+  }}
+
+  // ── DOCS_READ ──
+  { let m; while ((m = MARKER_RE.DOCS_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getDocsAccessToken(uid);
+        const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(p.id || p.eventId)}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await docRes.json();
+        if (docRes.ok) {
+          let body = '';
+          if (data.body?.content) {
+            const texts = [];
+            const walk = (els) => { for (const el of els) { if (el.paragraph?.elements) for (const pe of el.paragraph.elements) { if (pe.textRun?.content) texts.push(pe.textRun.content); } if (el.table?.tableRows) for (const row of el.table.tableRows) if (row.tableCells) for (const cell of row.tableCells) walk(cell.content); } };
+            walk(data.body.content);
+            body = texts.join('');
+          }
+          cleanText = cleanText.replace(raw, `📝 Document: ${data.title || ''}\n\n${body.slice(0, 5000)}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Docs read failed: ${data.error?.message || docRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs read error: ${e.message}`); }
+    }
+  }}
+
+  // ── DOCS_CREATE ──
+  { let m; while ((m = MARKER_RE.DOCS_CREATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.title) {
+      try {
+        const token = await getDocsAccessToken(uid);
+        const createRes = await fetch("https://docs.googleapis.com/v1/documents", {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ title: p.title })
+        });
+        const data = await createRes.json();
+        if (createRes.ok) {
+          const docId = data.documentId;
+          if (p.body) {
+            // Convert markdown to Docs requests (simplified)
+            const lines = p.body.split('\n');
+            const reqs = [];
+            let pos = 1;
+            for (const rawLine of lines) {
+              const text = rawLine + '\n';
+              reqs.push({ insertText: { location: { index: pos }, text } });
+              pos += text.length;
+            }
+            if (reqs.length) {
+              await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+                method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ requests: reqs })
+              });
+            }
+          }
+          cleanText = cleanText.replace(raw, `✅ Document created: "${data.title || p.title}" (ID: ${docId})`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Docs create failed: ${data.error?.message || createRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs create error: ${e.message}`); }
+    }
+  }}
+
+  // ── DOCS_WRITE ──
+  { let m; while ((m = MARKER_RE.DOCS_WRITE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.content) {
+      try {
+        const token = await getDocsAccessToken(uid);
+        const docId = p.id || p.eventId;
+        const reqs = [];
+        if (p.mode === 'replace') {
+          const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const docData = await docRes.json();
+          if (docRes.ok) {
+            const endIdx = docData.body?.content?.[docData.body.content.length - 1]?.endIndex;
+            if (endIdx && endIdx > 1) reqs.push({ deleteContentRange: { range: { startIndex: 1, endIndex } } });
+          }
+        }
+        const lines = p.content.split('\n');
+        let pos = 1;
+        for (const rawLine of lines) {
+          const text = rawLine + '\n';
+          reqs.push({ insertText: { location: { index: pos }, text } });
+          pos += text.length;
+        }
+        if (reqs.length) {
+          await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}:batchUpdate`, {
+            method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ requests: reqs })
+          });
+        }
+        cleanText = cleanText.replace(raw, `✅ Document updated (ID: ${docId})`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs write error: ${e.message}`); }
+    }
+  }}
+
+  // ── DOCS_DELETE ──
+  { let m; while ((m = MARKER_RE.DOCS_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getDocsAccessToken(uid);
+        const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}`, {
+          method: "DELETE", headers: { Authorization: `Bearer ${token}` }
+        });
+        if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Document deleted (ID: ${p.id || p.eventId})`);
+        else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Docs delete failed: ${e.error?.message || delRes.statusText}`); }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── DOCS_RENAME ──
+  { let m; while ((m = MARKER_RE.DOCS_RENAME.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.title) {
+      try {
+        const token = await getDocsAccessToken(uid);
+        const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}?fields=id,name`, {
+          method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ name: p.title })
+        });
+        const data = await renameRes.json();
+        if (renameRes.ok) cleanText = cleanText.replace(raw, `✅ Document renamed to: "${data.name}"`);
+        else cleanText = cleanText.replace(raw, `⚠ Docs rename failed: ${data.error?.message || renameRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs rename error: ${e.message}`); }
+    }
+  }}
+
+  // ── SLIDES_LIST ──
+  { let m; while ((m = MARKER_RE.SLIDES_LIST.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    try {
+      const token = await getSlidesAccessToken(uid);
+      const q = encodeURIComponent(p?.query
+        ? `name contains '${p.query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.presentation'`
+        : "mimeType='application/vnd.google-apps.presentation'");
+      const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(p?.maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await listRes.json();
+      if (listRes.ok && data.files?.length) {
+        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Modified: ${f.modifiedTime || ''}`).join('\n');
+        cleanText = cleanText.replace(raw, `📽 Presentations (${data.files.length}):\n${details}`);
+      } else {
+        cleanText = cleanText.replace(raw, `📽 No presentations found${p?.query ? ' for "' + p.query + '"' : ''}`);
+      }
+    } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides list error: ${e.message}`); }
+  }}
+
+  // ── SLIDES_READ ──
+  { let m; while ((m = MARKER_RE.SLIDES_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getSlidesAccessToken(uid);
+        const readRes = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(p.id || p.eventId)}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await readRes.json();
+        if (readRes.ok) {
+          const slides = (data.slides || []).map(s => {
+            const texts = (s.pageElements || []).filter(el => el.shape?.text?.textElements).flatMap(el => el.shape.text.textElements.filter(te => te.textRun?.content).map(te => te.textRun.content));
+            return `Slide ${s.objectId}: ${texts.join('').slice(0, 200)}`;
+          }).join('\n');
+          cleanText = cleanText.replace(raw, `📽 Presentation: ${data.title || ''}\n${slides}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Slides read failed: ${data.error?.message || readRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides read error: ${e.message}`); }
+    }
+  }}
+
+  // ── SLIDES_CREATE ──
+  { let m; while ((m = MARKER_RE.SLIDES_CREATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.title) {
+      try {
+        const token = await getSlidesAccessToken(uid);
+        const createRes = await fetch("https://slides.googleapis.com/v1/presentations", {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ title: p.title })
+        });
+        const data = await createRes.json();
+        if (createRes.ok) {
+          let slideCount = 0;
+          if (p.slides) {
+            const slidesArr = Array.isArray(p.slides) ? p.slides : p.slides.split(/\n?---\n?/).filter(Boolean);
+            slideCount = slidesArr.length;
+            const requests = [];
+            slidesArr.forEach((text, i) => {
+              const slideId = `auto_${i}`;
+              const shapeId = `auto_shape_${i}`;
+              requests.push({ createSlide: { objectId: slideId, insertionIndex: i, slideLayoutReference: { predefinedLayout: "BLANK" } } });
+              requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
+              const cleanText2 = typeof text === 'string' ? text.replace(/^#{1,3}\s+/, '').replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '') : '';
+              if (cleanText2) requests.push({ insertText: { objectId: shapeId, text: cleanText2, insertionIndex: 0 } });
+            });
+            if (requests.length) {
+              await fetch(`https://slides.googleapis.com/v1/presentations/${data.presentationId}:batchUpdate`, {
+                method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ requests })
+              });
+            }
+          }
+          cleanText = cleanText.replace(raw, `✅ Presentation created: "${data.title || p.title}" (ID: ${data.presentationId}, ${slideCount} slides)`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Slides create failed: ${data.error?.message || createRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides create error: ${e.message}`); }
+    }
+  }}
+
+  // ── SLIDES_WRITE ──
+  { let m; while ((m = MARKER_RE.SLIDES_WRITE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.slides) {
+      try {
+        const token = await getSlidesAccessToken(uid);
+        const presId = p.id || p.eventId;
+        const reqs = [];
+        if (p.mode === 'replace') {
+          const presRes = await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(presId)}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const presData = await presRes.json();
+          if (presRes.ok) (presData.slides || []).forEach(s => reqs.push({ deleteObject: { objectId: s.objectId } }));
+        }
+        const slidesArr = Array.isArray(p.slides) ? p.slides : p.slides.split(/\n?---\n?/).filter(Boolean);
+        slidesArr.forEach((text, i) => {
+          const slideId = `auto_${Date.now()}_${i}`;
+          const shapeId = `auto_shape_${i}`;
+          reqs.push({ createSlide: { objectId: slideId, insertionIndex: i, slideLayoutReference: { predefinedLayout: "BLANK" } } });
+          reqs.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
+          const ct = typeof text === 'string' ? text.replace(/^#{1,3}\s+/, '').replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '') : '';
+          if (ct) reqs.push({ insertText: { objectId: shapeId, text: ct, insertionIndex: 0 } });
+        });
+        if (reqs.length) {
+          await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(presId)}:batchUpdate`, {
+            method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ requests: reqs })
+          });
+        }
+        cleanText = cleanText.replace(raw, `✅ Presentation updated (ID: ${presId})`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides write error: ${e.message}`); }
+    }
+  }}
+
+  // ── SLIDES_DELETE ──
+  { let m; while ((m = MARKER_RE.SLIDES_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getSlidesAccessToken(uid);
+        const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}`, {
+          method: "DELETE", headers: { Authorization: `Bearer ${token}` }
+        });
+        if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Presentation deleted (ID: ${p.id || p.eventId})`);
+        else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Slides delete failed: ${e.error?.message || delRes.statusText}`); }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── SLIDES_RENAME ──
+  { let m; while ((m = MARKER_RE.SLIDES_RENAME.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.title) {
+      try {
+        const token = await getSlidesAccessToken(uid);
+        const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}?fields=id,name`, {
+          method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ name: p.title })
+        });
+        const data = await renameRes.json();
+        if (renameRes.ok) cleanText = cleanText.replace(raw, `✅ Presentation renamed to: "${data.name}"`);
+        else cleanText = cleanText.replace(raw, `⚠ Slides rename failed: ${data.error?.message || renameRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides rename error: ${e.message}`); }
+    }
+  }}
+
+  // ── SHEETS_LIST ──
+  { let m; while ((m = MARKER_RE.SHEETS_LIST.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    try {
+      const token = await getSheetsAccessToken(uid);
+      const q = encodeURIComponent(p?.query
+        ? `name contains '${p.query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet'`
+        : "mimeType='application/vnd.google-apps.spreadsheet'");
+      const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(p?.maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await listRes.json();
+      if (listRes.ok && data.files?.length) {
+        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Owner: ${f.owners?.[0]?.displayName || ''}`).join('\n');
+        cleanText = cleanText.replace(raw, `📊 Spreadsheets (${data.files.length}):\n${details}`);
+      } else {
+        cleanText = cleanText.replace(raw, `📊 No spreadsheets found${p?.query ? ' for "' + p.query + '"' : ''}`);
+      }
+    } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets list error: ${e.message}`); }
+  }}
+
+  // ── SHEETS_READ ──
+  { let m; while ((m = MARKER_RE.SHEETS_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getSheetsAccessToken(uid);
+        const rangeEnc = encodeURIComponent(p.range || "A1:ZZ");
+        const readRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(p.id || p.eventId)}/values/${rangeEnc}?majorDimension=ROWS`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await readRes.json();
+        if (readRes.ok) {
+          const vals = data.values || [];
+          const preview = vals.slice(0, 20).map(row => (Array.isArray(row) ? row.join(' | ') : String(row))).join('\n');
+          cleanText = cleanText.replace(raw, `📊 Sheet data (${vals.length} rows):\n${preview}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Sheets read failed: ${data.error?.message || readRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets read error: ${e.message}`); }
+    }
+  }}
+
+  // ── SHEETS_CREATE ──
+  { let m; while ((m = MARKER_RE.SHEETS_CREATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.title) {
+      try {
+        const token = await getSheetsAccessToken(uid);
+        const createRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ properties: { title: p.title } })
+        });
+        const data = await createRes.json();
+        if (createRes.ok) {
+          if (p.data && Array.isArray(p.data) && p.data.length) {
+            const rangeEnc = encodeURIComponent("A1");
+            await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${data.spreadsheetId}/values/${rangeEnc}?valueInputOption=USER_ENTERED`, {
+              method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ values: p.data, majorDimension: "ROWS" })
+            });
+          }
+          cleanText = cleanText.replace(raw, `✅ Spreadsheet created: "${data.properties?.title || p.title}" (ID: ${data.spreadsheetId})`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Sheets create failed: ${data.error?.message || createRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets create error: ${e.message}`); }
+    }
+  }}
+
+  // ── SHEETS_WRITE ──
+  { let m; while ((m = MARKER_RE.SHEETS_WRITE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.values) {
+      try {
+        const token = await getSheetsAccessToken(uid);
+        const sheetId = p.id || p.eventId;
+        const rangeEnc = encodeURIComponent(p.range || "A1");
+        let writeRes;
+        if (p.mode === 'append') {
+          writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}/values/${rangeEnc}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+            method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ values: p.values, majorDimension: "ROWS" })
+          });
+        } else {
+          writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}/values/${rangeEnc}?valueInputOption=USER_ENTERED`, {
+            method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ values: p.values, majorDimension: "ROWS" })
+          });
+        }
+        const writeData = await writeRes.json();
+        if (writeRes.ok) cleanText = cleanText.replace(raw, `✅ Sheet updated: ${writeData.updatedCells || 0} cells written`);
+        else cleanText = cleanText.replace(raw, `⚠ Sheets write failed: ${writeData.error?.message || writeRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets write error: ${e.message}`); }
+    }
+  }}
+
+  // ── SHEETS_DELETE ──
+  { let m; while ((m = MARKER_RE.SHEETS_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getSheetsAccessToken(uid);
+        const delRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}`, {
+          method: "DELETE", headers: { Authorization: `Bearer ${token}` }
+        });
+        if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Spreadsheet deleted (ID: ${p.id || p.eventId})`);
+        else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Sheets delete failed: ${e.error?.message || delRes.statusText}`); }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── SHEETS_RENAME ──
+  { let m; while ((m = MARKER_RE.SHEETS_RENAME.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId) && p.title) {
+      try {
+        const token = await getSheetsAccessToken(uid);
+        const renameRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(p.id || p.eventId)}?fields=id,name`, {
+          method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ name: p.title })
+        });
+        const data = await renameRes.json();
+        if (renameRes.ok) cleanText = cleanText.replace(raw, `✅ Spreadsheet renamed to: "${data.name}"`);
+        else cleanText = cleanText.replace(raw, `⚠ Sheets rename failed: ${data.error?.message || renameRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Sheets rename error: ${e.message}`); }
+    }
+  }}
+
+  // ── CALENDAR_LIST ──
+  { let m; while ((m = MARKER_RE.CALENDAR_LIST.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    try {
+      const token = await getCalendarAccessToken(uid);
+      const params = new URLSearchParams({ orderBy: "startTime", singleEvents: "true", maxResults: String(Math.min(p?.maxResults || 10, 50)) });
+      params.set("timeMin", p?.timeMin || new Date().toISOString());
+      if (p?.timeMax) params.set("timeMax", p.timeMax);
+      const listRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await listRes.json();
+      if (listRes.ok && data.items?.length) {
+        const details = data.items.map(e => `[ID:${e.id}] ${e.summary || '(no title)'} | Start: ${e.start?.dateTime || e.start?.date || '—'} | End: ${e.end?.dateTime || e.end?.date || '—'} | Status: ${e.status || 'confirmed'}`).join('\n');
+        cleanText = cleanText.replace(raw, `📅 Events (${data.items.length}):\n${details}`);
+      } else {
+        cleanText = cleanText.replace(raw, `📅 No upcoming events found.`);
+      }
+    } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar list error: ${e.message}`); }
+  }}
+
+  // ── CALENDAR_READ ──
+  { let m; while ((m = MARKER_RE.CALENDAR_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getCalendarAccessToken(uid);
+        const evId = p.id || p.eventId;
+        const readRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(evId)}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await readRes.json();
+        if (readRes.ok) {
+          cleanText = cleanText.replace(raw, `📅 Event: ${data.summary || '(no title)'}\nStart: ${data.start?.dateTime || data.start?.date || '—'}\nEnd: ${data.end?.dateTime || data.end?.date || '—'}\nStatus: ${data.status || ''}\nDescription: ${(data.description || '').slice(0, 1000)}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ Calendar read failed: ${data.error?.message || readRes.statusText}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar read error: ${e.message}`); }
+    }
+  }}
+
+  // ── CALENDAR_CREATE ──
+  { let m; while ((m = MARKER_RE.CALENDAR_CREATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.summary && p.start && p.end) {
+      try {
+        const token = await getCalendarAccessToken(uid);
+        const body = { summary: p.summary, description: p.description || '', start: p.start, end: p.end };
+        if (p.location) body.location = p.location;
+        if (p.attendees) body.attendees = p.attendees.map(email => ({ email }));
+        const createRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const data = await createRes.json();
+        if (createRes.ok) cleanText = cleanText.replace(raw, `✅ Event created: "${data.summary || p.summary}" (ID: ${data.id})`);
+        else cleanText = cleanText.replace(raw, `⚠ Calendar create failed: ${data.error?.message || createRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar create error: ${e.message}`); }
+    }
+  }}
+
+  // ── CALENDAR_QUICK_ADD ──
+  { let m; while ((m = MARKER_RE.CALENDAR_QUICK_ADD.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.text) {
+      try {
+        const token = await getCalendarAccessToken(uid);
+        const qaRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/quickAdd?text=${encodeURIComponent(p.text)}`, {
+          method: "POST", headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await qaRes.json();
+        if (qaRes.ok) cleanText = cleanText.replace(raw, `✅ Event created via quick add: "${data.summary || p.text}" (ID: ${data.id})`);
+        else cleanText = cleanText.replace(raw, `⚠ Calendar quick add failed: ${data.error?.message || qaRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar quick add error: ${e.message}`); }
+    }
+  }}
+
+  // ── CALENDAR_UPDATE ──
+  { let m; while ((m = MARKER_RE.CALENDAR_UPDATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getCalendarAccessToken(uid);
+        const evId = p.id || p.eventId;
+        const { id, eventId, ...fields } = p;
+        const updRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(evId)}`, {
+          method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(fields)
+        });
+        const data = await updRes.json();
+        if (updRes.ok) cleanText = cleanText.replace(raw, `✅ Event updated: "${data.summary || ''}" (ID: ${data.id})`);
+        else cleanText = cleanText.replace(raw, `⚠ Calendar update failed: ${data.error?.message || updRes.statusText}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar update error: ${e.message}`); }
+    }
+  }}
+
+  // ── CALENDAR_DELETE ──
+  { let m; while ((m = MARKER_RE.CALENDAR_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.id || p.eventId)) {
+      try {
+        const token = await getCalendarAccessToken(uid);
+        const evId = p.id || p.eventId;
+        const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(evId)}`, {
+          method: "DELETE", headers: { Authorization: `Bearer ${token}` }
+        });
+        if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Event deleted (ID: ${evId})`);
+        else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Calendar delete failed: ${e.error?.message || delRes.statusText}`); }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar delete error: ${e.message}`); }
+    }
+  }}
+
+  return { cleanText };
+}
+
 async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePrompt = false) {
   const lowLatency = req.body.lowLatency === true;
   let messages = req.body.messages;
@@ -3368,6 +4083,356 @@ app.post("/api/tts", async (req, res) => {
   } catch (err) {
     console.error("Murf TTS error:", err.message);
     res.status(500).json({ error: "Murf TTS failed: " + err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  🤖 CHAT ENDPOINT — full marker processing on backend
+//  Replaces per-agent streaming endpoints for marker-aware chat
+// ══════════════════════════════════════════════════════════════
+app.post("/api/chat", async (req, res) => {
+  const { messages, agent, lowLatency } = req.body;
+  if (!messages || !agent) return res.status(400).json({ error: "messages and agent required" });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Get uid for marker processing (optional — needed for OAuth token access)
+  let uid = null;
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader) uid = await getUserUid(authHeader);
+  } catch {}
+
+  try {
+    sendEvent({ type: "status", message: "🤖 Generating response…" });
+
+    let fullResponse = "";
+    const agentName = agent;
+
+    if (NVIDIA_MODEL_MAP[agentName]) {
+      const { model, key } = NVIDIA_MODEL_MAP[agentName];
+      const apiKey = process.env[key];
+      if (!apiKey) throw new Error(`${agentName} key not configured.`);
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        { model, messages, max_tokens: 16384, temperature: 0.7 },
+        sendEvent
+      );
+    } else if (agentName === "groq") {
+      if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }
+      const reader = groqRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") break;
+          try { const parsed = JSON.parse(data); const content = parsed.choices?.[0]?.delta?.content || ""; if (content) { fullResponse += content; sendEvent({ type: "token", text: content }); } } catch (_) {}
+        }
+      }
+    } else if (agentName === "mistral") {
+      if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://api.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "mistral-large-latest", messages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agentName === "codestral") {
+      if (!process.env.CODESTRAL_API_KEY) throw new Error("Codestral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://codestral.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.CODESTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "codestral-latest", messages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agentName === "gemini") {
+      if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+      const prompt = messages[messages.length - 1].content;
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse&key=${process.env.GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      });
+      if (!response.ok) { const text = await response.text(); throw new Error(`Gemini API error (${response.status}): ${text.slice(0, 200)}`); }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          try { const parsed = JSON.parse(data); const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || ""; if (text) { fullResponse += text; sendEvent({ type: "token", text }); } } catch (_) {}
+        }
+      }
+    } else if (agentName === "cohere") {
+      if (!process.env.COHERE_API_KEY) throw new Error("Cohere key not configured.");
+      const prompt = messages[messages.length - 1].content;
+      const response = await fetch("https://api.cohere.com/v2/chat", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.COHERE_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "command-r-plus-08-2024", messages: [{ role: "user", content: prompt }], max_tokens: 4096, stream: true })
+      });
+      if (!response.ok) { const text = await response.text(); throw new Error(`Cohere API error (${response.status}): ${text.slice(0, 200)}`); }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try { const parsed = JSON.parse(trimmed); if (parsed.type === "content-delta" && parsed.delta?.message?.content?.text) { fullResponse += parsed.delta.message.content.text; sendEvent({ type: "token", text: parsed.delta.message.content.text }); } } catch (_) {}
+        }
+      }
+    } else {
+      throw new Error("Invalid agent selected.");
+    }
+
+    // Send done event with raw response
+    sendEvent({ type: "done", result: fullResponse });
+
+    // Process markers if uid available
+    if (uid) {
+      const { cleanText } = await processMarkers(fullResponse, uid);
+      sendEvent({ type: "processed", displayText: cleanText, cleanText });
+    } else {
+      sendEvent({ type: "processed", displayText: fullResponse, cleanText: fullResponse });
+    }
+
+    res.end();
+  } catch (err) {
+    sendEvent({ type: "error", message: err.message });
+    res.end();
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  ⏰ TASK SCHEDULER — Persistent autonomous agent system
+//  Tasks stored at tasks/{uid}/{taskId} in RTDB
+// ══════════════════════════════════════════════════════════════
+
+// ── Helper: cron-like "daily at HH:MM" → next run timestamp ──
+function parseNextRun(schedule) {
+  if (!schedule) return Date.now() + 7200000; // default 2h
+  // Support "daily at HH:MM" or "HH:MM" format
+  const dailyMatch = schedule.match(/daily\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i) || schedule.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
+  if (dailyMatch) {
+    let h = parseInt(dailyMatch[1]), m = parseInt(dailyMatch[2]);
+    const ampm = (dailyMatch[3] || '').toLowerCase();
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    const now = new Date();
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next.getTime();
+  }
+  // Support "every X hours"
+  const everyMatch = schedule.match(/every\s+(\d+)\s*hours?/i);
+  if (everyMatch) return Date.now() + parseInt(everyMatch[1]) * 3600000;
+  // Support "every X minutes"
+  const minMatch = schedule.match(/every\s+(\d+)\s*minutes?/i);
+  if (minMatch) return Date.now() + parseInt(minMatch[1]) * 60000;
+  // Try parsing as a cron-like "0 19 * * *" (minute hour)
+  const cronMatch = schedule.match(/^(\d+)\s+(\d+)/);
+  if (cronMatch) {
+    const m = parseInt(cronMatch[1]), h = parseInt(cronMatch[2]);
+    const now = new Date();
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next.getTime();
+  }
+  return Date.now() + 7200000; // default 2h
+}
+
+// ── Create a task ──
+app.post("/api/tasks/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { prompt, schedule, agent, type, maxRuns, interval } = req.body;
+    if (!prompt) return res.status(400).json({ error: "prompt required" });
+
+    const now = Date.now();
+    const taskId = `task_${now}_${crypto.randomBytes(4).toString("hex")}`;
+    const nextRun = type === 'continuous' ? (now + (interval || 7200000)) : parseNextRun(schedule || 'daily at 19:00');
+
+    const task = {
+      prompt,
+      status: "active",
+      schedule: schedule || 'daily at 19:00',
+      agent: agent || 'openai',
+      type: type || 'scheduled',
+      interval: interval || 7200000,
+      lastRun: 0,
+      nextRun,
+      totalRuns: 0,
+      maxRuns: maxRuns || null,
+      conversationHistory: [],
+      context: {},
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await gmailDb().ref(`tasks/${uid}/${taskId}`).set(task);
+    res.json({ created: true, taskId, task });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── List tasks ──
+app.get("/api/tasks/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const snap = await gmailDb().ref(`tasks/${uid}`).once("value");
+    const data = snap.val() || {};
+    const tasks = Object.entries(data).map(([id, t]) => ({ taskId: id, ...t }));
+    res.json({ tasks });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Delete a task ──
+app.post("/api/tasks/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { taskId } = req.body;
+    if (!taskId) return res.status(400).json({ error: "taskId required" });
+    await gmailDb().ref(`tasks/${uid}/${taskId}`).remove();
+    res.json({ deleted: true, taskId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Pause/resume a task ──
+app.post("/api/tasks/pause", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { taskId } = req.body;
+    if (!taskId) return res.status(400).json({ error: "taskId required" });
+    const snap = await gmailDb().ref(`tasks/${uid}/${taskId}`).once("value");
+    const task = snap.val();
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    const newStatus = task.status === "active" ? "paused" : "active";
+    await gmailDb().ref(`tasks/${uid}/${taskId}/status`).set(newStatus);
+    await gmailDb().ref(`tasks/${uid}/${taskId}/updatedAt`).set(Date.now());
+    res.json({ status: newStatus, taskId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Tick: called by external cron every 2 hours — executes due tasks ──
+app.post("/api/tasks/tick", async (req, res) => {
+  // Optional simple auth check via a shared secret
+  const authHeader = req.headers.authorization;
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const provided = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (provided !== cronSecret) return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const now = Date.now();
+    const executed = [];
+
+    // Fetch all tasks across all users
+    const allTasksSnap = await gmailDb().ref('tasks').once('value');
+    const allUsersTasks = allTasksSnap.val() || {};
+
+    for (const [uid, userTasks] of Object.entries(allUsersTasks)) {
+      for (const [taskId, task] of Object.entries(userTasks)) {
+        if (task.status !== 'active' || task.nextRun > now) continue;
+        if (task.maxRuns && task.totalRuns >= task.maxRuns) {
+          await gmailDb().ref(`tasks/${uid}/${taskId}/status`).set('completed');
+          continue;
+        }
+
+        try {
+          // Build LLM prompt from task configuration
+          const history = task.conversationHistory || [];
+          const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
+          const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${contextStr}` };
+          const userMsg = task.type === 'continuous'
+            ? { role: 'user', content: `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?` }
+            : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
+          const messages = [systemMsg, ...history.slice(-10), userMsg];
+
+          // Call the LLM
+          const llmResponse = await callModelBackend(task.agent, messages);
+
+          // Process markers in the response
+          const { cleanText } = await processMarkers(llmResponse, uid);
+
+          // Check if task is complete
+          const isComplete = cleanText.includes('[TASK_COMPLETE]') || cleanText.includes('✅ Task complete');
+          const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
+          const nextRun = task.type === 'continuous'
+            ? (isComplete ? 0 : now + (task.interval || 7200000))
+            : parseNextRun(task.schedule);
+
+          // Update task state
+          const updates = {
+            lastRun: now,
+            nextRun: isComplete ? 0 : nextRun,
+            totalRuns: (task.totalRuns || 0) + 1,
+            conversationHistory: newConversationHistory.slice(-50), // keep last 50
+            updatedAt: now
+          };
+          if (isComplete) updates.status = 'completed';
+
+          await gmailDb().ref(`tasks/${uid}/${taskId}`).update(updates);
+          executed.push({ uid, taskId, status: isComplete ? 'completed' : 'executed' });
+        } catch (taskErr) {
+          console.error(`Task ${taskId} (${uid}) failed:`, taskErr.message);
+          await gmailDb().ref(`tasks/${uid}/${taskId}/lastRun`).set(now);
+          await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + 7200000); // retry in 2h
+          executed.push({ uid, taskId, status: 'failed', error: taskErr.message });
+        }
+      }
+    }
+
+    res.json({ ticked: true, timestamp: now, executed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
