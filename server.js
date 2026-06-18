@@ -626,20 +626,18 @@ app.post("/api/docs/create", async (req, res) => {
     });
     const data = await createRes.json();
     if (!createRes.ok) throw new Error(data.error?.message || `Docs API error (${createRes.status})`);
-    // If body provided, append it
     if (body) {
-      const appendRes = await fetch(`https://docs.googleapis.com/v1/documents/${data.documentId}:batchUpdate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requests: [{
-            insertText: { location: { index: 1 }, text: body }
-          }]
-        })
-      });
-      if (!appendRes.ok) {
-        const errData = await appendRes.json();
-        throw new Error("Doc created but content append failed: " + (errData.error?.message || appendRes.statusText));
+      const requests = markdownToDocsRequests(body);
+      if (requests.length) {
+        const appendRes = await fetch(`https://docs.googleapis.com/v1/documents/${data.documentId}:batchUpdate`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ requests })
+        });
+        if (!appendRes.ok) {
+          const errData = await appendRes.json();
+          throw new Error("Content append failed: " + (errData.error?.message || appendRes.statusText));
+        }
       }
     }
     res.json({ created: true, id: data.documentId, title: data.title || title, url: `https://docs.google.com/document/d/${data.documentId}/edit` });
@@ -647,6 +645,51 @@ app.post("/api/docs/create", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+function markdownToDocsRequests(md) {
+  const lines = md.split('\n');
+  const requests = [];
+  let pos = 1;
+  for (const raw of lines) {
+    let line = raw;
+    let heading = 0, isBullet = false, isNumbered = false;
+    const hm = line.match(/^(#{1,3})\s+/);
+    if (hm) { heading = hm[1].length; line = line.slice(hm[0].length); }
+    const bm = line.match(/^[-*]\s+/);
+    if (bm) { isBullet = true; line = line.slice(bm[0].length); }
+    const nm = line.match(/^\d+[.)]\s+/);
+    if (nm) { isNumbered = true; line = line.slice(nm[0].length); }
+    const spans = [];
+    let clean = '', i = 0;
+    while (i < line.length) {
+      if (line.slice(i, i + 2) === '**') {
+        const e = line.indexOf('**', i + 2);
+        if (e !== -1) { spans.push({ s: clean.length, e: clean.length + (e - i - 2), b: true }); clean += line.slice(i + 2, e); i = e + 2; continue; }
+      }
+      if (line[i] === '*' && line.slice(i, i + 2) !== '**') {
+        const e = line.indexOf('*', i + 1);
+        if (e !== -1 && line.slice(e, e + 2) !== '**') { spans.push({ s: clean.length, e: clean.length + (e - i - 1), i: true }); clean += line.slice(i + 1, e); i = e + 1; continue; }
+      }
+      clean += line[i]; i++;
+    }
+    if (heading === 0 && !isBullet && !isNumbered && raw.trim() === '') { clean = ''; }
+    const text = clean + '\n';
+    const start = pos;
+    requests.push({ insertText: { location: { index: start }, text } });
+    const end = start + text.length;
+    if (heading) requests.push({ updateParagraphStyle: { range: { startIndex: start, endIndex: end }, paragraphStyle: { namedStyleType: `HEADING_${heading}` }, fields: "namedStyleType" } });
+    if (isBullet) requests.push({ createParagraphBullets: { range: { startIndex: start, endIndex: end }, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE" } });
+    if (isNumbered) requests.push({ createParagraphBullets: { range: { startIndex: start, endIndex: end }, bulletPreset: "NUMBERED_DECIMAL_ALPHA_ROMAN" } });
+    for (const sp of spans) {
+      const ts = {};
+      if (sp.b) ts.bold = true;
+      if (sp.i) ts.italic = true;
+      requests.push({ updateTextStyle: { range: { startIndex: start + sp.s, endIndex: start + sp.e }, textStyle: ts, fields: Object.keys(ts).join(',') } });
+    }
+    pos = end;
+  }
+  return requests;
+}
 
 // ── Docs Step 7: Write/append text to existing document ──
 app.post("/api/docs/write", async (req, res) => {
@@ -657,10 +700,9 @@ app.post("/api/docs/write", async (req, res) => {
     const token = await getDocsAccessToken(uid);
     const requests = [];
     if (mode === "replace") {
-      // Delete all content then insert
       requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: 999999999 } } });
     }
-    requests.push({ insertText: { location: { index: 1 }, text: content } });
+    requests.push(...markdownToDocsRequests(content));
     const writeRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}:batchUpdate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
