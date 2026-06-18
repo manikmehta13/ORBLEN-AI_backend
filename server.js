@@ -2923,29 +2923,77 @@ async function processMarkers(text, uid) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.content) {
+    if (p && typeof p === 'object') {
       try {
         const memRef = gmailDb().ref(`memories/${uid}`);
         const snap = await memRef.once('value');
         const existing = snap.val() || {};
-        const content = p.content.trim();
-        const category = p.category || 'context';
-        // Check for duplicates using word-overlap similarity
-        const words = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
-        const wa = words(content);
-        let isDup = false;
-        for (const mem of Object.values(existing)) {
-          const wb = words(mem.content || '');
-          const inter = [...wa].filter(w => wb.has(w));
-          const uni = new Set([...wa, ...wb]);
-          if (uni.size > 0 && inter.length / uni.size > 0.55) { isDup = true; break; }
+
+        // Helper to format a value as YAML-like string
+        function formatMemoryValue(v, indent = 0) {
+          const pad = '  '.repeat(indent);
+          if (v === null || v === undefined) return '';
+          if (typeof v === 'string') return v;
+          if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+          if (Array.isArray(v)) return v.map(item => `\n${pad}- ${formatMemoryValue(item, indent + 1)}`).join('');
+          if (typeof v === 'object') {
+            const keys = Object.keys(v);
+            if (keys.length === 0) return '';
+            return keys.map(k => `\n${pad}${k}: ${formatMemoryValue(v[k], indent + 1)}`).join('');
+          }
+          return String(v);
         }
-        if (isDup) {
-          cleanText = cleanText.replace(raw, `🧠 Memory already exists (skipped duplicate): "${content.slice(0,80)}"`);
+
+        // Helper to detect duplicates
+        function isDuplicate(wa, existing) {
+          const wordsFn = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+          for (const mem of Object.values(existing)) {
+            const wb = wordsFn(mem.content || '');
+            const inter = [...wa].filter(w => wb.has(w));
+            const uni = new Set([...wa, ...wb]);
+            if (uni.size > 0 && inter.length / uni.size > 0.55) return true;
+          }
+          return false;
+        }
+
+        let savedCount = 0;
+        let skipCount = 0;
+        const wordsFn = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+
+        // If payload has a "content" field, store as a flat memory
+        if (p.content) {
+          const content = p.content.trim();
+          const category = p.category || 'context';
+          const wa = wordsFn(content);
+          if (isDuplicate(wa, existing)) {
+            skipCount++;
+          } else {
+            const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+            await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+            savedCount++;
+          }
         } else {
-          const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-          await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
-          cleanText = cleanText.replace(raw, `🧠 Memory saved: "${content.slice(0,80)}"`);
+          // Structured data: each top-level key becomes a memory
+          for (const [category, data] of Object.entries(p)) {
+            if (!data) continue;
+            const content = category + ':' + formatMemoryValue(data);
+            const wa = wordsFn(content);
+            if (isDuplicate(wa, existing)) {
+              skipCount++;
+            } else {
+              const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+              await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+              savedCount++;
+            }
+          }
+        }
+
+        if (savedCount > 0 && skipCount > 0) {
+          cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} new, ${skipCount} duplicates skipped)`);
+        } else if (savedCount > 0) {
+          cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} new facts)`);
+        } else {
+          cleanText = cleanText.replace(raw, `🧠 No new memories saved (${skipCount} duplicates skipped)`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
     }
@@ -4551,7 +4599,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"content":"User prefers concise answers"}[/SAVE_MEMORY]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
   const completeHint = task.type !== 'scheduled' ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
@@ -4575,7 +4623,13 @@ async function executeSingleTask(uid, taskId, task) {
     const mems = memSnap.val() || {};
     const entries = Object.values(mems).filter(m => m.content);
     if (entries.length) {
-      memoryInjection = '\n\n[Your existing memories about the user]\n' + entries.map(m => `- ${m.content}`).join('\n') + '\n\nUse SAVE_MEMORY to store new facts. Skip saving if the fact is already covered above — check carefully to avoid duplicates.';
+      const formatted = entries.map(m => {
+        if (m.content.includes('\n')) {
+          return m.content.split('\n').filter(Boolean).map((line, i) => i === 0 ? line : '  ' + line).join('\n');
+        }
+        return m.content;
+      }).join('\n');
+      memoryInjection = '\n\n[Your existing memories about the user]\n' + formatted + '\n\nUse SAVE_MEMORY to store new facts. Skip saving if the fact is already covered above — check carefully to avoid duplicates.';
     }
   } catch (e) { console.error('⏰ Memory fetch error:', e.message); }
 
