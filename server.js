@@ -397,7 +397,7 @@ app.post("/api/gmail/search", async (req, res) => {
     if (!data.messages || data.messages.length === 0) return res.json({ messages: [] });
     const details = await Promise.all(data.messages.slice(0, 10).map(async (m) => {
       try {
-        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         const d = await r.json();
@@ -418,7 +418,7 @@ app.post("/api/gmail/read", async (req, res) => {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: "id required" });
     const token = await getGmailAccessToken(uid);
-    const readRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, {
+    const readRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     const data = await readRes.json();
