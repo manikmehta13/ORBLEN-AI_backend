@@ -4384,7 +4384,8 @@ async function executeSingleTask(uid, taskId, task) {
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
   const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\nUse valid JSON inside markers.`;
-  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${markerExamples}${contextStr}` };
+  const completeHint = task.type !== 'scheduled' ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
+  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${contextStr}` };
   const userMsg = task.type === 'continuous'
     ? { role: 'user', content: `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?` }
     : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
