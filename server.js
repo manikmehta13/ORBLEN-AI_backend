@@ -2190,8 +2190,27 @@ async function processMarkers(text, uid) {
   }
 
   function markdownToHtml(s) {
-    let h = s
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Escape HTML entities first
+    let h = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inlineFmt = (t) => t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+    // Convert markdown tables: consecutive |...| lines with a separator row
+    h = h.replace(/((?:^[^\n]*\|[^\n]*$(?:\n|$))+)/gm, (block) => {
+      const rows = block.trim().split('\n').filter(r => r.trim().startsWith('|'));
+      if (rows.length < 3) return block; // need header + separator + at least 1 body row
+      const sepIdx = rows.findIndex(r => /^\|[\s:-]+\|/.test(r));
+      if (sepIdx < 0) return block;
+      const headRow = rows[sepIdx - 1];
+      const bodyRows = rows.slice(sepIdx + 1);
+      if (!headRow || !bodyRows.length) return block;
+      const cells = (r) => r.split('|').slice(1, -1).map(c => inlineFmt(c.trim()));
+      let tbl = '<table><thead><tr>';
+      cells(headRow).forEach(c => { tbl += `<th>${c}</th>`; });
+      tbl += '</tr></thead><tbody>';
+      bodyRows.forEach(r => { tbl += '<tr>'; cells(r).forEach(c => { tbl += `<td>${c}</td>`; }); tbl += '</tr>'; });
+      tbl += '</tbody></table>';
+      return tbl;
+    });
+    h = h
       .replace(/^### (.+)$/gm, '<h3>$1</h3>')
       .replace(/^## (.+)$/gm, '<h2>$1</h2>')
       .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -2206,8 +2225,9 @@ async function processMarkers(text, uid) {
       .replace(/^- (.+)$/gm, '<li>$1</li>')
       .replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
     h = h.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-    h = h.replace(/\n\n/g, '</p><p>');
-    h = h.replace(/\n/g, '<br>');
+    h = h.replace(/<table>[\s\S]*?<\/table>/g, m => m);
+    h = h.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>');
+    if (/^<table/i.test(h)) return h;
     return '<p>' + h + '</p>';
   }
 
