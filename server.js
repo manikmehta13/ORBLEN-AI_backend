@@ -19,7 +19,7 @@ const {
   publicSkill
 } = require("./skillRepository");
 
-// ── Firebase Admin (for per-user Canva tokens & ID token verification) ──
+// ── Firebase Admin (for per-user token storage & ID token verification) ──
 let firebaseReady = false;
 const fbRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
 if (fbRaw) {
@@ -243,11 +243,9 @@ app.post("/api/gemma4", apiChatRoute("gemma4"));
 app.post("/api/deepseek", apiChatRoute("deepseek"));
 
 // ══════════════════════════════════════════════════════════════
-//  🎨 CANVA INTEGRATION  (Connect API via OAuth2 + PKCE)
+//  ✉️ GMAIL INTEGRATION  (Google OAuth2 API)
 //  Per-user token storage via Firebase RTDB
 // ══════════════════════════════════════════════════════════════
-
-const canvaVerifiers = new Map();
 
 // ── Firebase token verification helper ──
 async function getUserUid(authHeader) {
@@ -258,120 +256,183 @@ async function getUserUid(authHeader) {
   return decoded.uid;
 }
 
-// ── RTDB token helpers ──
-const canvaDb = () => getDatabase();
+const gmailStates = new Map();
 
-async function getCanvaTokens(uid) {
-  const snap = await canvaDb().ref(`users/${uid}/canva`).once("value");
+// ── RTDB token helpers ──
+const gmailDb = () => getDatabase();
+
+async function getGmailTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/gmail`).once("value");
   return snap.val() || null;
 }
 
-async function setCanvaTokens(uid, tokens) {
-  await canvaDb().ref(`users/${uid}/canva`).set(tokens);
+async function setGmailTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/gmail`).set(tokens);
 }
 
-async function refreshCanvaTokens(uid, current) {
-  const tokenRes = await fetch("https://api.canva.com/rest/v1/oauth/token", {
+async function refreshGmailTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: {
-      "Authorization": `Basic ${Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString("base64")}`,
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: current.refreshToken })
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
   });
   const data = await tokenRes.json();
-  if (!tokenRes.ok) throw new Error("Canva token refresh failed: " + (data.message || tokenRes.statusText));
-  const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
-  await setCanvaTokens(uid, tokens);
+  if (!tokenRes.ok) throw new Error("Gmail token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setGmailTokens(uid, tokens);
   return tokens;
 }
 
-async function getCanvaAccessToken(uid) {
-  const tokens = await getCanvaTokens(uid);
-  if (!tokens || !tokens.refreshToken) throw new Error("Canva not connected");
+async function getGmailAccessToken(uid) {
+  const tokens = await getGmailTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Gmail not connected");
   if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
-  const refreshed = await refreshCanvaTokens(uid, tokens);
+  const refreshed = await refreshGmailTokens(uid, tokens);
   return refreshed.accessToken;
 }
 
-// ── Step 1: Get auth URL (requires Firebase token) ──
-app.get("/api/canva/auth-url", async (req, res) => {
+// ── Step 1: Get Google OAuth URL ──
+app.get("/api/gmail/auth-url", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
     const state = crypto.randomBytes(32).toString("hex");
-    const codeVerifier = crypto.randomBytes(96).toString("base64url");
-    const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
-    canvaVerifiers.set(state, { codeVerifier, uid, expiresAt: Date.now() + 600_000 });
-    const scopes = "design:content:write design:meta:read asset:read";
-    const redirectUri = process.env.CANVA_REDIRECT_URI;
+    gmailStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly";
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
     res.json({
-      url: `https://www.canva.com/api/oauth/authorize?code_challenge=${codeChallenge}&code_challenge_method=s256&scope=${encodeURIComponent(scopes)}&response_type=code&client_id=${process.env.CANVA_CLIENT_ID}&state=${state}&redirect_uri=${encodeURIComponent(redirectUri)}`
+      url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent`
     });
   } catch (err) {
     res.status(401).json({ error: err.message });
   }
 });
 
-// ── Step 2: OAuth callback (Canva redirects here) ──
-app.get("/api/canva/oauth/callback", async (req, res) => {
+// ── Step 2: OAuth callback (Google redirects here) ──
+app.get("/api/gmail/oauth/callback", async (req, res) => {
   const { code, state } = req.query;
   if (!code || !state) return res.status(400).send("Missing code or state");
-  const stored = canvaVerifiers.get(state);
+  const stored = gmailStates.get(state);
   if (!stored) return res.status(400).send("Invalid state");
-  canvaVerifiers.delete(state);
+  gmailStates.delete(state);
   try {
-    const tokenRes = await fetch("https://api.canva.com/rest/v1/oauth/token", {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
-      headers: {
-        "Authorization": `Basic ${Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString("base64")}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: new URLSearchParams({ grant_type: "authorization_code", code_verifier: stored.codeVerifier, code, redirect_uri: process.env.CANVA_REDIRECT_URI })
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code, client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+        grant_type: "authorization_code"
+      })
     });
     const data = await tokenRes.json();
-    if (!tokenRes.ok) throw new Error(data.message || "Token exchange failed");
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
     const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
-    await setCanvaTokens(stored.uid, tokens);
+    await setGmailTokens(stored.uid, tokens);
     const frontend = process.env.FRONTEND_URL || "http://localhost:8888";
-    res.redirect(`${frontend}?canva=connected`);
+    res.redirect(`${frontend}?gmail=connected`);
   } catch (err) {
-    res.status(500).send("Canva OAuth failed: " + err.message);
+    res.status(500).send("Gmail OAuth failed: " + err.message);
   }
 });
 
 // ── Step 3: Check connection status ──
-app.get("/api/canva/status", async (req, res) => {
+app.get("/api/gmail/status", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const tokens = await getCanvaTokens(uid);
+    const tokens = await getGmailTokens(uid);
     res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
   } catch {
     res.json({ connected: false, expiresAt: 0 });
   }
 });
 
-// ── Step 4: Create a design ──
-app.post("/api/canva/create-design", async (req, res) => {
+// ── Step 4: Send an email ──
+app.post("/api/gmail/send", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { title, design_type, width, height, asset_id } = req.body;
-    if (!title) return res.status(400).json({ error: "title required" });
-    const token = await getCanvaAccessToken(uid);
-    const body = { type: "type_and_asset", title };
-    if (design_type === "custom" && width && height) {
-      body.design_type = { type: "custom", width, height };
-    } else {
-      body.design_type = { type: "preset", name: design_type || "doc" };
-    }
-    if (asset_id) body.asset_id = asset_id;
-    const designRes = await fetch("https://api.canva.com/rest/v1/designs", {
+    const { to, subject, body } = req.body;
+    if (!to || !subject || !body) return res.status(400).json({ error: "to, subject, body required" });
+    const token = await getGmailAccessToken(uid);
+    const email = [
+      `From: me`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset=UTF-8`,
+      "",
+      body
+    ].join("\r\n");
+    const raw = Buffer.from(email).toString("base64url");
+    const sendRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ raw })
     });
-    const data = await designRes.json();
-    if (!designRes.ok) throw new Error(data.message || `Canva API error (${designRes.status})`);
-    res.json({ url: data.design.urls.edit_url, view_url: data.design.urls.view_url, design_id: data.design.id, title: data.design.title });
+    const data = await sendRes.json();
+    if (!sendRes.ok) throw new Error(data.error?.message || `Gmail API error (${sendRes.status})`);
+    res.json({ sent: true, id: data.id, threadId: data.threadId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Step 5: Search emails ──
+app.post("/api/gmail/search", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { query, maxResults } = req.body;
+    if (!query) return res.status(400).json({ error: "query required" });
+    const token = await getGmailAccessToken(uid);
+    const searchRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${Math.min(maxResults || 10, 50)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await searchRes.json();
+    if (!searchRes.ok) throw new Error(data.error?.message || `Gmail API error (${searchRes.status})`);
+    if (!data.messages || data.messages.length === 0) return res.json({ messages: [] });
+    const details = await Promise.all(data.messages.slice(0, 10).map(async (m) => {
+      try {
+        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const d = await r.json();
+        const headers = (d.payload?.headers || []).reduce((acc, h) => { acc[h.name] = h.value; return acc; }, {});
+        return { id: m.id, from: headers.From || "", to: headers.To || "", subject: headers.Subject || "", date: headers.Date || "", snippet: d.snippet || "" };
+      } catch { return null; }
+    }));
+    res.json({ messages: details.filter(Boolean) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Step 6: Read a specific email ──
+app.post("/api/gmail/read", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getGmailAccessToken(uid);
+    const readRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await readRes.json();
+    if (!readRes.ok) throw new Error(data.error?.message || `Gmail API error (${readRes.status})`);
+    const headers = (data.payload?.headers || []).reduce((acc, h) => { acc[h.name] = h.value; return acc; }, {});
+    const parts = [data.payload];
+    while (parts.length) {
+      const p = parts.shift();
+      if (p.parts) parts.push(...p.parts);
+      if (p.mimeType === "text/plain" && p.body?.data) {
+        return res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: Buffer.from(p.body.data, "base64").toString("utf-8") });
+      }
+    }
+    res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: "(no plain text body found)" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2325,7 +2386,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.CANVA_CLIENT_ID    ? "✅ Canva"         : "❌ Canva",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail"        : "❌ Gmail",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
