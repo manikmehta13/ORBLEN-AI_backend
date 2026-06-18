@@ -2126,11 +2126,18 @@ async function processMarkers(text, uid) {
   if (!text || !uid) return { cleanText: text || '' };
   let cleanText = text;
 
+  function parseMarkerJsonOrAttrs(str) {
+    try { return JSON.parse(str); } catch {}
+    const attrs = {};
+    str.replace(/(\w+)\s*=\s*"([^"]*)"/g, (_, k, v) => { attrs[k] = v; return ''; });
+    if (attrs.to || attrs.subject || attrs.body) return attrs;
+    return null;
+  }
+
   // ── GMAIL_SEND ──
   { let m; while ((m = MARKER_RE.GMAIL_SEND.exec(text)) !== null) {
     const raw = m[0], idx = m.index;
-    let p;
-    try { p = JSON.parse(m[1]); } catch {}
+    let p = parseMarkerJsonOrAttrs(m[1]);
     if (p && p.to && p.subject && p.body) {
       try {
         const token = await getGmailAccessToken(uid);
@@ -4376,7 +4383,8 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${contextStr}` };
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\nUse valid JSON inside markers.`;
+  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations. When you complete the overall task, end your response with [TASK_COMPLETE].${markerExamples}${contextStr}` };
   const userMsg = task.type === 'continuous'
     ? { role: 'user', content: `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?` }
     : { role: 'user', content: `Execute your task now. Use the available tools (markers) to perform the requested actions.` };
