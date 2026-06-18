@@ -416,8 +416,10 @@ function cleanEmailBody(body) {
   if (!body) return body;
   // Remove @media blocks
   body = body.replace(/@media\s*[^{]*\{[^}]*\}/gs, '');
-  // Remove CSS rules: anything like "selector { ... }"
-  body = body.replace(/[.#a-zA-Z@][\w\s,#.\-:*>+~[\]()=^$|]+\s*\{[^}]*\}/gs, '');
+  // Remove CSS rules including attribute selectors with quotes
+  body = body.replace(/[.#a-zA-Z@]\w[\w\s,#.\-:*>+~[\]()=^$|"']*\s*\{[^}]*\}/gs, '');
+  // Remove orphaned CSS braces (stray `}` lines left after partial stripping)
+  body = body.replace(/^\s*\}\s*$/gm, '');
   // Remove inline style tags
   body = body.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
   // Remove HTML tags
