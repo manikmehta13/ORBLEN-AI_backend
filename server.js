@@ -4451,7 +4451,8 @@ app.post("/api/tasks/run", async (req, res) => {
     const result = await executeSingleTask(uid, taskId, task);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(`⏰ Run task error: ${err.stack || err.message}`);
+    res.status(500).json({ error: err.message, stack: (process.env.NODE_ENV !== 'production') ? err.stack : undefined });
   }
 });
 
