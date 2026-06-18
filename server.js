@@ -2120,6 +2120,7 @@ const MARKER_RE = {
   CALENDAR_QUICK_ADD: /\[CALENDAR_QUICK_ADD\](.*?)\[\/CALENDAR_QUICK_ADD\]/gs,
   CALENDAR_UPDATE: /\[CALENDAR_UPDATE\](.*?)\[\/CALENDAR_UPDATE\]/gs,
   CALENDAR_DELETE: /\[CALENDAR_DELETE\](.*?)\[\/CALENDAR_DELETE\]/gs,
+  SAVE_MEMORY:     /\[SAVE_MEMORY\](.*?)\[\/SAVE_MEMORY\]/gs,
 };
 
 async function processMarkers(text, uid) {
@@ -2914,6 +2915,39 @@ async function processMarkers(text, uid) {
         if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Event deleted (ID: ${evId})`);
         else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Calendar delete failed: ${e.error?.message || delRes.statusText}`); }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── SAVE_MEMORY ──
+  { let m; while ((m = MARKER_RE.SAVE_MEMORY.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.content) {
+      try {
+        const memRef = gmailDb().ref(`memories/${uid}`);
+        const snap = await memRef.once('value');
+        const existing = snap.val() || {};
+        const content = p.content.trim();
+        const category = p.category || 'context';
+        // Check for duplicates using word-overlap similarity
+        const words = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+        const wa = words(content);
+        let isDup = false;
+        for (const mem of Object.values(existing)) {
+          const wb = words(mem.content || '');
+          const inter = [...wa].filter(w => wb.has(w));
+          const uni = new Set([...wa, ...wb]);
+          if (uni.size > 0 && inter.length / uni.size > 0.55) { isDup = true; break; }
+        }
+        if (isDup) {
+          cleanText = cleanText.replace(raw, `🧠 Memory already exists (skipped duplicate): "${content.slice(0,80)}"`);
+        } else {
+          const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+          await memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+          cleanText = cleanText.replace(raw, `🧠 Memory saved: "${content.slice(0,80)}"`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
     }
   }}
 
@@ -4517,7 +4551,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"content":"User prefers concise answers"}[/SAVE_MEMORY]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
   const completeHint = task.type !== 'scheduled' ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
@@ -4534,7 +4568,18 @@ async function executeSingleTask(uid, taskId, task) {
     }
   }
 
-  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${contextStr}` };
+  // Inject existing memories so the LLM knows what's already stored
+  let memoryInjection = '';
+  try {
+    const memSnap = await gmailDb().ref(`memories/${uid}`).once('value');
+    const mems = memSnap.val() || {};
+    const entries = Object.values(mems).filter(m => m.content);
+    if (entries.length) {
+      memoryInjection = '\n\n[Your existing memories about the user]\n' + entries.map(m => `- ${m.content}`).join('\n') + '\n\nUse SAVE_MEMORY to store new facts. Skip saving if the fact is already covered above — check carefully to avoid duplicates.';
+    }
+  } catch (e) { console.error('⏰ Memory fetch error:', e.message); }
+
+  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${memoryInjection}${contextStr}` };
   const userContent = task.type === 'continuous'
     ? `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?`
     : `Execute your task now. Use the available tools (markers) to perform the requested actions.${webInjection}`;
