@@ -833,7 +833,7 @@ function slideContentToRequests(slides) {
     const slideId = `nx_slide_${idx}`;
     const shapeId = `nx_shape_${idx}`;
     requests.push({ createSlide: { objectId: slideId, insertionIndex: idx, slideLayoutReference: { predefinedLayout: "BLANK" } } });
-    requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30 } } } });
+    requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
     const { clean, spans } = parseText(text);
     if (clean) {
       requests.push({ insertText: { objectId: shapeId, text: clean, insertionIndex: 0 } });
