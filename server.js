@@ -1335,7 +1335,7 @@ app.post("/api/calendar/list", async (req, res) => {
     const { maxResults, timeMin, timeMax } = req.body;
     const token = await getCalendarAccessToken(uid);
     const params = new URLSearchParams({ orderBy: "startTime", singleEvents: "true", maxResults: String(Math.min(maxResults || 10, 50)) });
-    if (timeMin) params.set("timeMin", timeMin);
+    params.set("timeMin", timeMin || new Date().toISOString());
     if (timeMax) params.set("timeMax", timeMax);
     const listRes = await fetch(`${CAL_API}/calendars/primary/events?${params}`, {
       headers: { Authorization: `Bearer ${token}` }
@@ -3278,7 +3278,7 @@ DELIVERY RULES:
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-20b",
+          model: "openai/gpt-oss-120b",
           messages,
           max_tokens: 1200,
           temperature: 0.4,
