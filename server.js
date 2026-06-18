@@ -2134,6 +2134,61 @@ async function processMarkers(text, uid) {
     return null;
   }
 
+  function markdownToDocsRequests(md) {
+    const STYLES = { 1: 'HEADING_1', 2: 'HEADING_2', 3: 'HEADING_3' };
+    const reqs = []; let pos = 1;
+    for (const rawLine of md.split('\n')) {
+      const line = rawLine;
+      if (/^-{3,}$/.test(line.trim())) { pos++; continue; }
+      const hM = line.match(/^(#{1,3})\s+(.*)/);
+      if (hM) {
+        const lvl = hM[1].length;
+        const segs = parseInline(hM[2]);
+        const txt = segs.map(s => s.t).join('') + '\n';
+        reqs.push({ insertText: { location: { index: pos } }, text: txt });
+        reqs.push({ updateParagraphStyle: { range: { startIndex: pos, endIndex: pos + txt.length - 1 }, paragraphStyle: { namedStyleType: STYLES[lvl] }, fields: 'namedStyleType' } });
+        addFormatReqs(reqs, segs, pos); pos += txt.length; continue;
+      }
+      const lM = line.match(/^[\-\*]\s+(.*)/);
+      const content = lM ? lM[1] : line;
+      if (!content) { pos++; continue; }
+      const segs = parseInline(content);
+      const prefix = lM ? '• ' : '';
+      const txt = prefix + segs.map(s => s.t).join('') + '\n';
+      reqs.push({ insertText: { location: { index: pos } }, text: txt });
+      addFormatReqs(reqs, segs, pos + prefix.length); pos += txt.length;
+    }
+    return reqs;
+    function parseInline(s) {
+      const out = []; let r = s;
+      while (r.length) {
+        const m = r.match(/(\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/);
+        if (!m) { out.push({ t: r }); break; }
+        if (m.index > 0) out.push({ t: r.slice(0, m.index) });
+        const f = m[0];
+        if (f.startsWith('***')) out.push({ t: m[2], b: 1, i: 1 });
+        else if (f.startsWith('**')) out.push({ t: m[3], b: 1 });
+        else if (f.startsWith('*') && f.endsWith('*') && !f.endsWith('**')) out.push({ t: m[4], i: 1 });
+        else if (f.startsWith('`')) out.push({ t: m[5], c: 1 });
+        else if (f.startsWith('[')) out.push({ t: m[6], l: m[7] });
+        else out.push({ t: f });
+        r = r.slice(m.index + f.length);
+      }
+      return out;
+    }
+    function addFormatReqs(reqs, segs, basePos) {
+      let cp = basePos;
+      for (const seg of segs) {
+        const end = cp + seg.t.length;
+        if (seg.b) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { bold: true }, fields: 'bold' } });
+        if (seg.i) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { italic: true }, fields: 'italic' } });
+        if (seg.c) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { fontFamily: 'Consolas', fontSize: { magnitude: 9, unit: 'PT' } }, fields: 'fontFamily,fontSize' } });
+        if (seg.l) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { link: { url: seg.l } } }, fields: 'link' });
+        cp = end;
+      }
+    }
+  }
+
   function markdownToHtml(s) {
     let h = s
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -2321,15 +2376,7 @@ async function processMarkers(text, uid) {
         if (createRes.ok) {
           const docId = data.documentId;
           if (p.body) {
-            // Convert markdown to Docs requests (simplified)
-            const lines = p.body.split('\n');
-            const reqs = [];
-            let pos = 1;
-            for (const rawLine of lines) {
-              const text = rawLine + '\n';
-              reqs.push({ insertText: { location: { index: pos }, text } });
-              pos += text.length;
-            }
+            const reqs = markdownToDocsRequests(p.body);
             if (reqs.length) {
               await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
                 method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
