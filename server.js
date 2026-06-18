@@ -2944,58 +2944,27 @@ async function processMarkers(text, uid) {
           return String(v);
         }
 
-        // Normalize category to match frontend expectations (personal, preference, project, context)
-        const CATEGORY_MAP = {
-          personal_information: 'personal',
-          personal_info: 'personal',
-          contact_information: 'personal',
-          contact: 'personal',
-          preferences: 'preference',
-          communication_style: 'preference',
-          projects: 'project',
-          project: 'project',
-          technical_skills: 'context',
-          skills: 'context',
-          career_interests: 'context',
-          interests: 'context',
-          recent_context: 'context',
-          education: 'personal',
-          role: 'personal',
-          occupation: 'personal',
-          github: 'context',
-        };
-        function normalizeCat(key) { return CATEGORY_MAP[key] || 'context'; }
-
-        // Group by normalized category, then merge content so keys mapping to the same
-        // category (e.g. personal_information + contact_information → personal) don't overwrite each other.
-        function replaceOrCreate(normalizedCat, mergedContent) {
-          const category = normalizedCat;
-          // Delete old entries with this normalized category
+        // Use raw top-level keys as categories (personal_information, education, projects, etc.)
+        // One memory entry per unique key. Same key replaces old entry with that key.
+        function replaceOrCreate(category, content) {
           const existingIds = Object.entries(existing)
-            .filter(([, mem]) => (CATEGORY_MAP[mem.category] || mem.category || 'context') === category)
+            .filter(([, mem]) => mem.category === category)
             .map(([id]) => id);
           for (const id of existingIds) memRef.child(id).remove();
-          // Save new merged entry
           const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-          memRef.child(memId).set({ id: memId, content: mergedContent, category, emoji: '💡', createdAt: Date.now() });
+          memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
         }
 
         if (p.content) {
-          // Flat memory: one per category
-          replaceOrCreate(normalizeCat(p.category || 'context'), p.content.trim());
+          // Flat memory: category defaults to 'others'
+          replaceOrCreate(p.category || 'others', p.content.trim());
           cleanText = cleanText.replace(raw, `🧠 Memory saved`);
         } else {
-          // Group top-level keys by normalized category, merge content within each group
-          const groups = {};
-          for (const [rawCat, data] of Object.entries(p)) {
-            if (!data) continue;
-            const norm = normalizeCat(rawCat);
-            if (!groups[norm]) groups[norm] = '';
-            groups[norm] += '\n' + rawCat + ':' + formatMemoryValue(data);
-          }
+          // Each top-level key is its own category
           let count = 0;
-          for (const [norm, content] of Object.entries(groups)) {
-            replaceOrCreate(norm, content.trim());
+          for (const [cat, data] of Object.entries(p)) {
+            if (!data) continue;
+            replaceOrCreate(cat, cat + ':' + formatMemoryValue(data));
             count++;
           }
           cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} ${count === 1 ? 'section' : 'sections'})`);
