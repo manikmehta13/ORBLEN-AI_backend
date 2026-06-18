@@ -2956,6 +2956,28 @@ async function processMarkers(text, uid) {
           return false;
         }
 
+        // Normalize category to match frontend expectations (personal, preference, project, context)
+        const CATEGORY_MAP = {
+          personal_information: 'personal',
+          personal_info: 'personal',
+          contact_information: 'personal',
+          contact: 'personal',
+          preferences: 'preference',
+          communication_style: 'preference',
+          projects: 'project',
+          project: 'project',
+          technical_skills: 'context',
+          skills: 'context',
+          career_interests: 'context',
+          interests: 'context',
+          recent_context: 'context',
+          education: 'personal',
+          role: 'personal',
+          occupation: 'personal',
+          github: 'context',
+        };
+        function normalizeCat(key) { return CATEGORY_MAP[key] || 'context'; }
+
         let savedCount = 0;
         let skipCount = 0;
         const wordsFn = s => new Set(s.toLowerCase().split(/\W+/).filter(w => w.length > 3));
@@ -2974,9 +2996,10 @@ async function processMarkers(text, uid) {
           }
         } else {
           // Structured data: each top-level key becomes a memory
-          for (const [category, data] of Object.entries(p)) {
+          for (const [rawCat, data] of Object.entries(p)) {
             if (!data) continue;
-            const content = category + ':' + formatMemoryValue(data);
+            const content = rawCat + ':' + formatMemoryValue(data);
+            const category = normalizeCat(rawCat);
             const wa = wordsFn(content);
             if (isDuplicate(wa, existing)) {
               skipCount++;
