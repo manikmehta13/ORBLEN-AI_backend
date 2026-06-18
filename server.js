@@ -4456,6 +4456,9 @@ app.post("/api/tasks/run", async (req, res) => {
     const snap = await gmailDb().ref(`tasks/${uid}/${taskId}`).once("value");
     const task = snap.val();
     if (!task) return res.status(404).json({ error: "Task not found" });
+    // Reset history so the LLM starts fresh (no stale failed attempts)
+    await gmailDb().ref(`tasks/${uid}/${taskId}/conversationHistory`).set([]);
+    task.conversationHistory = [];
     const result = await executeSingleTask(uid, taskId, task);
     res.json(result);
   } catch (err) {
