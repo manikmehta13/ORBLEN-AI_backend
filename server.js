@@ -4267,7 +4267,7 @@ app.post("/api/chat", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // ── Helper: cron-like "daily at HH:MM" → next run timestamp ──
-function parseNextRun(schedule) {
+function parseNextRun(schedule, timezone) {
   if (!schedule) return Date.now() + 7200000; // default 2h
   // Support "daily at HH:MM" or "HH:MM" format
   const dailyMatch = schedule.match(/daily\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i) || schedule.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
@@ -4276,6 +4276,29 @@ function parseNextRun(schedule) {
     const ampm = (dailyMatch[3] || '').toLowerCase();
     if (ampm === 'pm' && h < 12) h += 12;
     if (ampm === 'am' && h === 12) h = 0;
+
+    if (timezone) {
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      });
+      const now = new Date();
+      const wall = Object.fromEntries(fmt.formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+      let ty = parseInt(wall.year), tm = parseInt(wall.month), td = parseInt(wall.day);
+      if (h < parseInt(wall.hour) || (h === parseInt(wall.hour) && m <= parseInt(wall.minute))) {
+        const tom = new Date(ty, tm - 1, td + 1);
+        ty = tom.getFullYear(); tm = tom.getMonth() + 1; td = tom.getDate();
+      }
+      let approx = new Date(Date.UTC(ty, tm - 1, td, h, m));
+      for (let i = 0; i < 2; i++) {
+        const w2 = Object.fromEntries(fmt.formatToParts(approx).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+        const wh = parseInt(w2.hour), wm = parseInt(w2.minute);
+        if (wh === h && wm === m) break;
+        approx = new Date(approx.getTime() + (h - wh) * 3600000 + (m - wm) * 60000);
+      }
+      return approx.getTime();
+    }
+
     const now = new Date();
     const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
     if (next <= now) next.setDate(next.getDate() + 1);
@@ -4303,17 +4326,18 @@ function parseNextRun(schedule) {
 app.post("/api/tasks/create", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { prompt, schedule, agent, type, maxRuns, interval } = req.body;
+    const { prompt, schedule, agent, type, maxRuns, interval, timezone } = req.body;
     if (!prompt) return res.status(400).json({ error: "prompt required" });
 
     const now = Date.now();
     const taskId = `task_${now}_${crypto.randomBytes(4).toString("hex")}`;
-    const nextRun = type === 'continuous' ? (now + (interval || 7200000)) : parseNextRun(schedule || 'daily at 19:00');
+    const nextRun = type === 'continuous' ? (now + (interval || 7200000)) : parseNextRun(schedule || 'daily at 19:00', timezone);
 
     const task = {
       prompt,
       status: "active",
       schedule: schedule || 'daily at 19:00',
+      timezone: timezone || null,
       agent: agent || 'openai',
       type: type || 'scheduled',
       interval: interval || 7200000,
@@ -4398,7 +4422,7 @@ async function executeSingleTask(uid, taskId, task) {
   const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
   const nextRun = task.type === 'continuous'
     ? (isComplete ? 0 : now + (task.interval || 7200000))
-    : parseNextRun(task.schedule);
+    : parseNextRun(task.schedule, task.timezone);
 
   const updates = {
     lastRun: now,
