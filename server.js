@@ -459,6 +459,222 @@ app.post("/api/gmail/read", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  📝 GOOGLE DOCS API
+// ══════════════════════════════════════════════════════════════
+
+const docsStates = new Map();
+
+async function getDocsTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/docs`).once("value");
+  return snap.val() || null;
+}
+async function setDocsTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/docs`).set(tokens);
+}
+async function refreshDocsTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Docs token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setDocsTokens(uid, tokens);
+  return tokens;
+}
+async function getDocsAccessToken(uid) {
+  const tokens = await getDocsTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Google Docs not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshDocsTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+const DOCS_REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI || '').replace('/gmail/', '/docs/');
+
+// ── Docs Step 1: Get OAuth URL ──
+app.get("/api/docs/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    docsStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive.metadata.readonly";
+    res.json({
+      url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(DOCS_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent`
+    });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 2: OAuth callback ──
+app.get("/api/docs/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = docsStates.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  docsStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code, client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: DOCS_REDIRECT_URI,
+        grant_type: "authorization_code"
+      })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setDocsTokens(stored.uid, tokens);
+    const frontend = process.env.FRONTEND_URL || "http://localhost:8888";
+    res.redirect(`${frontend}?docs=connected`);
+  } catch (err) {
+    res.status(500).send("Docs OAuth failed: " + err.message);
+  }
+});
+
+// ── Docs Step 3: Check status ──
+app.get("/api/docs/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getDocsTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch {
+    res.json({ connected: false, expiresAt: 0 });
+  }
+});
+
+// ── Docs Step 4: List documents via Drive API ──
+app.post("/api/docs/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { query, maxResults } = req.body;
+    const token = await getDocsAccessToken(uid);
+    const q = encodeURIComponent(query ? `name contains '${query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.document'` : "mimeType='application/vnd.google-apps.document'");
+    const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await listRes.json();
+    if (!listRes.ok) throw new Error(data.error?.message || `Drive API error (${listRes.status})`);
+    res.json({ files: (data.files || []).map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime, modifiedTime: f.modifiedTime, owner: f.owners?.[0]?.displayName || "" })) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 5: Read document content ──
+app.post("/api/docs/read", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const token = await getDocsAccessToken(uid);
+    const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await docRes.json();
+    if (!docRes.ok) throw new Error(data.error?.message || `Docs API error (${docRes.status})`);
+    // Extract plain text from the document body
+    let bodyText = "";
+    if (data.body?.content) {
+      const texts = [];
+      const walk = (elements) => {
+        for (const el of elements) {
+          if (el.paragraph?.elements) {
+            for (const pe of el.paragraph.elements) {
+              if (pe.textRun?.content) texts.push(pe.textRun.content);
+            }
+          }
+          if (el.table?.tableRows) {
+            for (const row of el.table.tableRows) {
+              if (row.tableCells) {
+                for (const cell of row.tableCells) walk(cell.content);
+              }
+            }
+          }
+        }
+      };
+      walk(data.body.content);
+      bodyText = texts.join("");
+    }
+    res.json({ id: data.documentId, title: data.title || "", body: bodyText });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 6: Create a new document ──
+app.post("/api/docs/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { title, body } = req.body;
+    if (!title) return res.status(400).json({ error: "title required" });
+    const token = await getDocsAccessToken(uid);
+    const createRes = await fetch("https://docs.googleapis.com/v1/documents", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title })
+    });
+    const data = await createRes.json();
+    if (!createRes.ok) throw new Error(data.error?.message || `Docs API error (${createRes.status})`);
+    // If body provided, append it
+    if (body) {
+      const appendRes = await fetch(`https://docs.googleapis.com/v1/documents/${data.documentId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requests: [{
+            insertText: { location: { index: 1 }, text: body }
+          }]
+        })
+      });
+      if (!appendRes.ok) {
+        const errData = await appendRes.json();
+        throw new Error("Doc created but content append failed: " + (errData.error?.message || appendRes.statusText));
+      }
+    }
+    res.json({ created: true, id: data.documentId, title: data.title || title, url: `https://docs.google.com/document/d/${data.documentId}/edit` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Docs Step 7: Write/append text to existing document ──
+app.post("/api/docs/write", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { id, content, mode } = req.body;
+    if (!id || !content) return res.status(400).json({ error: "id and content required" });
+    const token = await getDocsAccessToken(uid);
+    const requests = [];
+    if (mode === "replace") {
+      // Delete all content then insert
+      requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: 999999999 } } });
+    }
+    requests.push({ insertText: { location: { index: 1 }, text: content } });
+    const writeRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests })
+    });
+    const data = await writeRes.json();
+    if (!writeRes.ok) throw new Error(data.error?.message || `Docs API error (${writeRes.status})`);
+    res.json({ written: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  ✨ ROUTE 7: Prompt Enhancer — uses Groq (FREE), fallback NVIDIA
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -2406,7 +2622,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail"        : "❌ Gmail",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs" : "❌ Gmail / Docs",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
