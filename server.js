@@ -2966,41 +2966,40 @@ async function processMarkers(text, uid) {
         };
         function normalizeCat(key) { return CATEGORY_MAP[key] || 'context'; }
 
-        // One category → one memory. Find existing by normalized category and replace it.
-        function replaceOrCreate(rawCat, content) {
-          const category = normalizeCat(rawCat);
-          // Find all existing memories with this normalized category
+        // Group by normalized category, then merge content so keys mapping to the same
+        // category (e.g. personal_information + contact_information → personal) don't overwrite each other.
+        function replaceOrCreate(normalizedCat, mergedContent) {
+          const category = normalizedCat;
+          // Delete old entries with this normalized category
           const existingIds = Object.entries(existing)
             .filter(([, mem]) => (CATEGORY_MAP[mem.category] || mem.category || 'context') === category)
             .map(([id]) => id);
-          // Delete old entries for this category
-          for (const id of existingIds) {
-            memRef.child(id).remove();
-          }
-          // Save new
+          for (const id of existingIds) memRef.child(id).remove();
+          // Save new merged entry
           const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-          memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+          memRef.child(memId).set({ id: memId, content: mergedContent, category, emoji: '💡', createdAt: Date.now() });
         }
-
-        let savedCount = 0;
 
         if (p.content) {
           // Flat memory: one per category
-          const content = p.content.trim();
-          const rawCat = p.category || 'context';
-          replaceOrCreate(rawCat, content);
-          savedCount++;
+          replaceOrCreate(normalizeCat(p.category || 'context'), p.content.trim());
+          cleanText = cleanText.replace(raw, `🧠 Memory saved`);
         } else {
-          // Structured: each top-level key is a category → one memory per key
+          // Group top-level keys by normalized category, merge content within each group
+          const groups = {};
           for (const [rawCat, data] of Object.entries(p)) {
             if (!data) continue;
-            const content = rawCat + ':' + formatMemoryValue(data);
-            replaceOrCreate(rawCat, content);
-            savedCount++;
+            const norm = normalizeCat(rawCat);
+            if (!groups[norm]) groups[norm] = '';
+            groups[norm] += '\n' + rawCat + ':' + formatMemoryValue(data);
           }
+          let count = 0;
+          for (const [norm, content] of Object.entries(groups)) {
+            replaceOrCreate(norm, content.trim());
+            count++;
+          }
+          cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} ${count === 1 ? 'section' : 'sections'})`);
         }
-
-        cleanText = cleanText.replace(raw, `🧠 Memory saved (${savedCount} ${savedCount === 1 ? 'fact' : 'facts'})`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
     }
   }}
