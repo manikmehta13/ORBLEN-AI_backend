@@ -1350,10 +1350,11 @@ app.post("/api/calendar/list", async (req, res) => {
 app.post("/api/calendar/read", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { id } = req.body;
-    if (!id) return res.status(400).json({ error: "id required" });
+    const { id, eventId } = req.body;
+    const evId = id || eventId;
+    if (!evId) return res.status(400).json({ error: "id required" });
     const token = await getCalendarAccessToken(uid);
-    const readRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+    const readRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(evId)}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     const data = await readRes.json();
@@ -1404,10 +1405,11 @@ app.post("/api/calendar/quick-add", async (req, res) => {
 app.post("/api/calendar/update", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { id, ...fields } = req.body;
-    if (!id) return res.status(400).json({ error: "id required" });
+    const { id, eventId, ...fields } = req.body;
+    const evId = id || eventId;
+    if (!evId) return res.status(400).json({ error: "id required" });
     const token = await getCalendarAccessToken(uid);
-    const updRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+    const updRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(evId)}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(fields)
@@ -1422,10 +1424,11 @@ app.post("/api/calendar/update", async (req, res) => {
 app.post("/api/calendar/delete", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { id } = req.body;
-    if (!id) return res.status(400).json({ error: "id required" });
+    const { id, eventId } = req.body;
+    const evId = id || eventId;
+    if (!evId) return res.status(400).json({ error: "id required" });
     const token = await getCalendarAccessToken(uid);
-    const delRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(id)}`, {
+    const delRes = await fetch(`${CAL_API}/calendars/primary/events/${encodeURIComponent(evId)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` }
     });
