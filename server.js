@@ -2134,8 +2134,26 @@ async function processMarkers(text, uid) {
     return null;
   }
 
-  function stripMarkdown(s) {
-    return s.replace(/^###?\s*/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/`([^`]+)`/g, '$1').replace(/~~([^~]+)~~/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/^[*-]\s+/gm, '').replace(/^>\s+/gm, '').replace(/(?:^|\n)-{3,}(?:\n|$)/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  function markdownToHtml(s) {
+    let h = s
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+      .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
+      .replace(/^-{3,}$/gm, '<hr>')
+      .replace(/^\* (.+)$/gm, '<li>$1</li>')
+      .replace(/^- (.+)$/gm, '<li>$1</li>')
+      .replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    h = h.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+    h = h.replace(/\n\n/g, '</p><p>');
+    h = h.replace(/\n/g, '<br>');
+    return '<p>' + h + '</p>';
   }
 
   // ── GMAIL_SEND ──
@@ -2145,8 +2163,25 @@ async function processMarkers(text, uid) {
     if (p && p.to && p.subject && p.body) {
       try {
         const token = await getGmailAccessToken(uid);
-        const plainBody = stripMarkdown(p.body);
-        const email = [`From: me`,`To: ${p.to}`,`Subject: ${p.subject}`,`MIME-Version: 1.0`,`Content-Type: text/plain; charset=UTF-8`,"",plainBody].join("\r\n");
+        const htmlBody = markdownToHtml(p.body);
+        const plainBody = p.body.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+        const boundary = `boundary_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const email = [
+          `From: me`,`To: ${p.to}`,`Subject: ${p.subject}`,
+          `MIME-Version: 1.0`,
+          `Content-Type: multipart/alternative; boundary="${boundary}"`,
+          ``,
+          `--${boundary}`,
+          `Content-Type: text/plain; charset=UTF-8`,
+          ``,
+          plainBody,
+          `--${boundary}`,
+          `Content-Type: text/html; charset=UTF-8`,
+          `Content-Transfer-Encoding: quoted-printable`,
+          ``,
+          `<!DOCTYPE html><html><body style="font-family:sans-serif;line-height:1.6">${htmlBody}</body></html>`,
+          `--${boundary}--`
+        ].join("\r\n");
         const raw64 = Buffer.from(email).toString("base64url");
         const sendRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
           method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -4412,7 +4447,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\nUse valid JSON inside markers. Email bodies must be plain text only — no markdown.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
   const completeHint = task.type !== 'scheduled' ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
