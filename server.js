@@ -1342,7 +1342,7 @@ app.post("/api/calendar/list", async (req, res) => {
     });
     const data = await listRes.json();
     if (!listRes.ok) throw new Error(data.error?.message || `Calendar API error (${listRes.status})`);
-    res.json({ items: (data.items || []).map(e => ({ id: e.id, summary: e.summary || "(no title)", description: e.description || "", start: e.start, end: e.end, status: e.status, location: e.location || "", hangoutLink: e.hangoutLink || "" })) });
+    res.json({ events: (data.items || []).map(e => ({ id: e.id, summary: e.summary || "(no title)", description: e.description || "", start: e.start, end: e.end, status: e.status, location: e.location || "", hangoutLink: e.hangoutLink || "" })) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1358,7 +1358,7 @@ app.post("/api/calendar/read", async (req, res) => {
     });
     const data = await readRes.json();
     if (!readRes.ok) throw new Error(data.error?.message || `Calendar API error (${readRes.status})`);
-    res.json({ id: data.id, summary: data.summary, description: data.description, start: data.start, end: data.end, status: data.status, location: data.location, hangoutLink: data.hangoutLink, createdAt: data.created, updated: data.updated, creator: data.creator, attendees: data.attendees || [] });
+    res.json({ event: { id: data.id, summary: data.summary, description: data.description, start: data.start, end: data.end, status: data.status, location: data.location, htmlLink: data.htmlLink, hangoutLink: data.hangoutLink, createdAt: data.created, updated: data.updated, creator: data.creator, attendees: data.attendees || [] } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1379,7 +1379,7 @@ app.post("/api/calendar/create", async (req, res) => {
     });
     const data = await createRes.json();
     if (!createRes.ok) throw new Error(data.error?.message || `Calendar API error (${createRes.status})`);
-    res.json({ created: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end });
+    res.json({ event: { id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1396,7 +1396,7 @@ app.post("/api/calendar/quick-add", async (req, res) => {
     });
     const data = await qaRes.json();
     if (!qaRes.ok) throw new Error(data.error?.message || `Calendar API error (${qaRes.status})`);
-    res.json({ created: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end });
+    res.json({ event: { id: data.id, summary: data.summary, htmlLink: data.htmlLink, start: data.start, end: data.end } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1414,7 +1414,7 @@ app.post("/api/calendar/update", async (req, res) => {
     });
     const data = await updRes.json();
     if (!updRes.ok) throw new Error(data.error?.message || `Calendar API error (${updRes.status})`);
-    res.json({ updated: true, id: data.id, summary: data.summary, htmlLink: data.htmlLink });
+    res.json({ event: { id: data.id, summary: data.summary, htmlLink: data.htmlLink } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
