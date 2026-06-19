@@ -1799,7 +1799,19 @@ ${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet.'}
 
 ${ratingStr}
 
-Available agents: SPAWN_AGENT (spawn sub-agent with {"task":"...","model":"openai"}), CHECK_AGENT (check status with {"sessionId":"..."}), ASK_USER (ask user with question text), CODE markers for file operations.`
+Available markers (use EXACT format with square brackets):
+
+[CODE_READ]{"path":"src/index.js"}[/CODE_READ]
+[CODE_WRITE]{"path":"src/index.js","content":"console.log('hello');"}[/CODE_WRITE]
+[CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]
+[CODE_DELETE]{"path":"src/old.js"}[/CODE_DELETE]
+[CODE_GLOB]{"pattern":"src/**/*.js"}[/CODE_GLOB]
+[CODE_GREP]{"pattern":"function","path":"src"}[/CODE_GREP]
+[CODE_EXEC]{"command":"npm test"}[/CODE_EXEC]
+[CODE_GIT]{"command":"status"}[/CODE_GIT]
+[SPAWN_AGENT]{"task":"Write unit tests for src/utils.js","model":"openai"}[/SPAWN_AGENT]
+[CHECK_AGENT]{"sessionId":"agent_xxx"}[/CHECK_AGENT]
+[ASK_USER]What database should I use?[/ASK_USER]`
     };
     const allMessages = [systemMsg, ...conversationMessages];
 
