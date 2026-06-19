@@ -4574,7 +4574,7 @@ async function executeSingleTask(uid, taskId, task) {
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
   const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
-  const completeHint = task.type !== 'scheduled' ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
+  const completeHint = (task.type !== 'scheduled' && task.type !== 'continuous') ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
   let webInjection = '';
@@ -4609,7 +4609,7 @@ async function executeSingleTask(uid, taskId, task) {
 
   const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${memoryInjection}${contextStr}` };
   const userContent = task.type === 'continuous'
-    ? `Continue working on your task. Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nWhat is your next step?`
+    ? `Continue your recurring task (runs every ${((task.interval || 60000)/60000).toFixed(0)} min). Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nRepeat your action. Do NOT mark as complete — this runs automatically on schedule.`
     : `Execute your task now. Use the available tools (markers) to perform the requested actions.${webInjection}`;
   const userMsg = { role: 'user', content: userContent };
   const messages = [systemMsg, ...history.slice(-10), userMsg];
