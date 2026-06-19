@@ -3029,6 +3029,10 @@ function wrapBareJson(parsed, markerTypes) {
 async function processMarkers(text, uid, projectId = null) {
   if (!text || !uid) return { cleanText: text || '' };
   
+  // Normalize double markers: [MARKER][MARKER]...[/MARKER][/MARKER] -> [MARKER]...[/MARKER]
+  text = text.replace(/(\[([A-Z_]+)\])(\[\2\])/g, '$1');  // [CODE_WRITE][CODE_WRITE] -> [CODE_WRITE]
+  text = text.replace(/(\[\/([A-Z_]+)\])(\[\/\2\])/g, '$1'); // [/CODE_WRITE][/CODE_WRITE] -> [/CODE_WRITE]
+
   // Auto-wrap bare JSON payloads that look like marker data (LLM often forgets brackets)
   text = autoWrapBareMarkers(text);
   
