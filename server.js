@@ -1789,26 +1789,28 @@ app.post("/api/projects/project-chat", async (req, res) => {
 
     const systemMsg = {
       role: "system",
-      content: `You are a coding assistant working on the project "${p.name}". You can use CODE markers to perform file operations (CODE_READ/WRITE/EDIT/DELETE/GLOB/GREP/EXEC/GIT). Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents. Use ASK_USER to ask the user questions when you need decisions.
+      content: `You are a coding assistant working INSIDE the project "${p.name}". 
 
+CRITICAL RULES:
+• You are ALREADY inside this project. Do NOT create a new project — use CODE_WRITE/CODE_EDIT to modify files directly in this project.
+• To CREATE a file, you MUST use [CODE_WRITE]{"path":"filename.ext","content":"file content here"}[/CODE_WRITE] — do NOT just describe the file contents in text.
+• Any file content you describe in plain text will NOT be saved. You MUST use the CODE_WRITE marker for every single file.
+• After using CODE_WRITE, the file will appear in the project file list automatically.
+• Use CODE_PROJECT_CREATE ONLY if the user explicitly asks to start a brand new project.
+• Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents.
+• Use ASK_USER to ask the user questions when you need decisions.
 Keep responses concise and focused.
 
 Project: ${p.name}
 Description: ${p.description || 'N/A'}
-${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet.'}
+${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet — use CODE_WRITE to create them.'}
 
 ${ratingStr}
 
 Available markers (use EXACT format with square brackets):
 
-Project management:
-[CODE_PROJECT_CREATE]{"name":"My Project","description":"Optional description"}[/CODE_PROJECT_CREATE]
-[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]
-[CODE_PROJECT_DELETE]{"projectId":"proj_xxx"}[/CODE_PROJECT_DELETE]
-
-File operations (all accept optional "projectId" field):
+[CODE_WRITE]{"path":"src/index.js","content":"console.log('hello');"}[/CODE_WRITE]    ← ALWAYS use this to create files!
 [CODE_READ]{"path":"src/index.js"}[/CODE_READ]
-[CODE_WRITE]{"path":"src/index.js","content":"console.log('hello');"}[/CODE_WRITE]
 [CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]
 [CODE_DELETE]{"path":"src/old.js"}[/CODE_DELETE]
 [CODE_GLOB]{"pattern":"src/**/*.js"}[/CODE_GLOB]
@@ -1817,7 +1819,10 @@ File operations (all accept optional "projectId" field):
 [CODE_GIT]{"command":"status"}[/CODE_GIT]
 [SPAWN_AGENT]{"task":"Write unit tests for src/utils.js","model":"openai"}[/SPAWN_AGENT]
 [CHECK_AGENT]{"sessionId":"agent_xxx"}[/CHECK_AGENT]
-[ASK_USER]What database should I use?[/ASK_USER]`
+[ASK_USER]What database should I use?[/ASK_USER]
+[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]    ← Only for new projects
+[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]
+[CODE_PROJECT_DELETE]{"projectId":"proj_xxx"}[/CODE_PROJECT_DELETE]`
     };
     const allMessages = [systemMsg, ...conversationMessages];
 
