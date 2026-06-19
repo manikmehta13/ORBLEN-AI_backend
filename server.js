@@ -1959,8 +1959,13 @@ app.post("/api/projects/project-chat", async (req, res) => {
 CRITICAL RULES:
 • You are ALREADY inside this project. Do NOT create a new project — use CODE_WRITE/CODE_EDIT to modify files directly in this project.
 • To CREATE a file, you MUST use [CODE_WRITE]{"path":"filename.ext","content":"file content here"}[/CODE_WRITE] — do NOT just describe the file contents in text.
-• Any file content you describe in plain text will NOT be saved. You MUST use the CODE_WRITE marker for every single file.
-• After using CODE_WRITE, the file will appear in the project file list automatically.
+• To EDIT a file, you MUST use [CODE_EDIT]{"path":"src/file.js","oldString":"old text","newString":"new text"}[/CODE_EDIT] — do NOT list edits as a plain JSON array or describe them in words.
+• To READ a file, you MUST use [CODE_READ]{"path":"src/file.js"}[/CODE_READ] — do NOT guess or write file content manually.
+• Every marker MUST have opening [MARKER] and closing [/MARKER] brackets around the JSON. If you write {"path":"...","oldString":"..."} without [CODE_EDIT] brackets, it is IGNORED.
+• BAD (ignored): {"path":"src/chat.html","oldString":"foo","newString":"bar"}
+• GOOD (works): [CODE_EDIT]{"path":"src/chat.html","oldString":"foo","newString":"bar"}[/CODE_EDIT]
+• Any file content you describe in plain text will NOT be saved.
+• After using CODE_WRITE/CODE_EDIT, the file will appear in the project file list automatically.
 • Use CODE_PROJECT_CREATE ONLY if the user explicitly asks to start a brand new project.
 • Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents — they run in background 24x7.
 • Use SPAWN_AGENT with agentGroup to group related agents (e.g., "build_ai_chatbot") so you can review them together.
@@ -1975,11 +1980,11 @@ ${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet — use CODE_W
 
 ${ratingStr}
 
-Available markers (use EXACT format with square brackets):
+Available markers (use EXACT format with square brackets — every marker MUST start with [MARKER and end with [/MARKER]):
 
 [CODE_WRITE]{"path":"src/index.js","content":"console.log('hello');"}[/CODE_WRITE]    ← ALWAYS use this to create files!
 [CODE_READ]{"path":"src/index.js"}[/CODE_READ]
-[CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]
+[CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]    ← Must have [CODE_EDIT] brackets!
 [CODE_DELETE]{"path":"src/old.js"}[/CODE_DELETE]
 [CODE_GLOB]{"pattern":"src/**/*.js"}[/CODE_GLOB]
 [CODE_GREP]{"pattern":"function","path":"src"}[/CODE_GREP]
@@ -5770,7 +5775,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\n[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]\n[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]\n[SPAWN_AGENT]{"task":"Build frontend","model":"openai","agentGroup":"my_group","projectId":"proj_xxx"}[/SPAWN_AGENT]\n[CODE_WRITE]{"path":"file.js","content":"code","projectId":"proj_xxx"}[/CODE_WRITE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML. To work with projects, first create one with CODE_PROJECT_CREATE, then use CODE_*/SPAWN_AGENT markers with the "projectId" field. Use "agentGroup" with SPAWN_AGENT to group related sub-agents for automatic supervision review when all complete.`;
+  const markerExamples = `\n\nMarker format examples (every marker MUST have [MARKER]...[/MARKER] brackets around it):\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\n[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]\n[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]\n[CODE_WRITE]{"path":"file.js","content":"code","projectId":"proj_xxx"}[/CODE_WRITE]\n[CODE_EDIT]{"path":"file.js","oldString":"old","newString":"new","projectId":"proj_xxx"}[/CODE_EDIT]\n[SPAWN_AGENT]{"task":"Build frontend","model":"openai","agentGroup":"my_group","projectId":"proj_xxx"}[/SPAWN_AGENT]\nDo NOT write {"path":"file.js"} without [CODE_EDIT] brackets — it will be ignored. Every marker MUST have the square brackets around it. Email body supports markdown — it will be converted to HTML. To work with projects, first create one with CODE_PROJECT_CREATE, then use CODE_*/SPAWN_AGENT markers with the "projectId" field. Use "agentGroup" with SPAWN_AGENT to group related sub-agents for automatic supervision review when all complete.`;
   const completeHint = (task.type !== 'scheduled' && task.type !== 'continuous') ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
