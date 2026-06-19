@@ -4705,6 +4705,9 @@ app.post("/api/tasks/tick", async (req, res) => {
 // Lightweight health check for Render
 app.get("/health", (req, res) => res.send("OK"));
 
+// Internal tick every 60 seconds — server is always warm from UptimeRobot pings
+setInterval(() => executeDueTasks(), 60000);
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 ORBLEN AI Backend running on port ${PORT}`);
