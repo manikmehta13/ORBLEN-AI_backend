@@ -4638,7 +4638,10 @@ async function executeSingleTask(uid, taskId, task) {
 }
 
 // ── executeDueTasks: check and execute all due tasks ──
+let _executingTasks = false;
 async function executeDueTasks() {
+  if (_executingTasks) return [];
+  _executingTasks = true;
   const now = Date.now();
   const executed = [];
 
@@ -4659,13 +4662,16 @@ async function executeDueTasks() {
         } catch (taskErr) {
           console.error(`⏰ Task ${taskId} (${uid}) failed:`, taskErr.message);
           await gmailDb().ref(`tasks/${uid}/${taskId}/lastRun`).set(now);
-          await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + 7200000);
+          const retryInterval = task.type === 'continuous' ? (task.interval || 60000) : 7200000;
+          await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + retryInterval);
           executed.push({ uid, taskId, status: 'failed', error: taskErr.message });
         }
       }
     }
   } catch (err) {
     console.error('⏰ executeDueTasks error:', err.message);
+  } finally {
+    _executingTasks = false;
   }
 
   return executed;
@@ -4705,11 +4711,10 @@ app.post("/api/tasks/tick", async (req, res) => {
 // Lightweight health check for Render
 app.get("/health", (req, res) => res.send("OK"));
 
-// Internal tick every 60 seconds — server is always warm from UptimeRobot pings
-setInterval(() => executeDueTasks(), 60000);
-
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
+  // Internal tick every 60 seconds — server is always warm from UptimeRobot pings
+  setInterval(() => executeDueTasks(), 60000);
   console.log(`🚀 ORBLEN AI Backend running on port ${PORT}`);
   console.log(`   Keys loaded: ${[
     process.env.NVIDIA_KEY_GPTOSS  ? "✅ GPT-OSS-120B" : "❌ GPT-OSS-120B",
