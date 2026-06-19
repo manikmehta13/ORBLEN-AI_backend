@@ -4702,6 +4702,9 @@ app.post("/api/tasks/tick", async (req, res) => {
   res.json({ ticked: true, timestamp: Date.now(), executed });
 });
 
+// Lightweight health check for Render
+app.get("/health", (req, res) => res.send("OK"));
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 ORBLEN AI Backend running on port ${PORT}`);
