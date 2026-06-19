@@ -1518,6 +1518,7 @@ async function getProjectProgress(pid) {
   const agents = agentsSnap.val() || {};
   const agentList = Object.values(agents).map(a => ({
     id: a.id, type: a.type, task: a.task, status: a.status || 'queued',
+    agentGroup: a.agentGroup || null,
     progress: a.progress || 0, error: a.error || null, model: a.model || 'unknown'
   }));
   const total = agentList.length;
@@ -1553,9 +1554,9 @@ async function updateAgentRating(type, success) {
 //  👾 MULTI-AGENT EXECUTION — spawned background agents
 // ══════════════════════════════════════════════════════════════
 
-async function spawnSubAgent(uid, projectId, sessionId, task, model, type) {
+async function spawnSubAgent(uid, projectId, sessionId, task, model, type, agentGroup = null) {
   const ref = gmailDb().ref(`projects/${projectId}/agents/${sessionId}`);
-  const agentData = { id: sessionId, type: type || model || 'openai', task, status: 'queued', progress: 0, result: null, error: null, model: model || 'openai', createdAt: Date.now(), updatedAt: Date.now() };
+  const agentData = { id: sessionId, type: type || model || 'openai', task, agentGroup, status: 'queued', progress: 0, result: null, error: null, model: model || 'openai', createdAt: Date.now(), updatedAt: Date.now() };
   await ref.set(agentData);
 
   // Execute asynchronously
@@ -1569,12 +1570,12 @@ async function executeSubAgent(uid, projectId, sessionId, task, model) {
   let agentType = model || 'openai';
 
   try {
-    await ref.update({ status: 'running', progress: 20, updatedAt: Date.now() });
+    await ref.update({ status: 'running', progress: 15, updatedAt: Date.now() });
 
-    const systemMsg = { role: 'system', content: 'You are a sub-agent working on a specific task within a larger project. Be concise and focused. Return your result using [AGENT_RESULT] marker when done.' };
+    const systemMsg = { role: 'system', content: 'You are a sub-agent working on a specific task within a larger project. You can use ANY marker: CODE_WRITE, CODE_READ, CODE_EDIT, CODE_DELETE, CODE_GLOB, CODE_GREP, CODE_EXEC, CODE_GIT, GMAIL_SEND, TALK_TO_AGENT, ASK_USER, AGENT_RESULT. Always use the exact format: [MARKER_NAME]{...json...}[/MARKER_NAME].' };
     const messages = [systemMsg, { role: 'user', content: task }];
 
-    await ref.update({ progress: 40, updatedAt: Date.now() });
+    await ref.update({ progress: 25, updatedAt: Date.now() });
 
     let response = '';
     try {
@@ -1582,6 +1583,12 @@ async function executeSubAgent(uid, projectId, sessionId, task, model) {
     } catch {
       response = await callModelBackend('openai', messages);
     }
+
+    await ref.update({ progress: 50, updatedAt: Date.now() });
+
+    // Process ALL markers from sub-agent response (CODE_WRITE, GMAIL_SEND, TALK_TO_AGENT, etc.)
+    const processed = await processMarkers(response, uid, projectId);
+    response = processed.cleanText;
 
     await ref.update({ progress: 70, updatedAt: Date.now() });
 
@@ -1597,11 +1604,169 @@ async function executeSubAgent(uid, projectId, sessionId, task, model) {
       updatedAt: Date.now()
     });
 
+    // Check if this agent is part of a group → check group completion
+    const agentSnap = await ref.once('value');
+    const agentData = agentSnap.val();
+    if (agentData && agentData.agentGroup) {
+      await checkAgentGroupCompletion(uid, projectId, agentData.agentGroup);
+    }
+
     // Update agent ratings
     await updateAgentRating(agentType, true);
   } catch (err) {
     await ref.update({ status: 'failed', error: err.message, progress: 0, updatedAt: Date.now() });
     await updateAgentRating(agentType, false);
+  }
+}
+
+// ── Agent group supervision ──
+async function checkAgentGroupCompletion(uid, projectId, agentGroup) {
+  try {
+    const agentsSnap = await gmailDb().ref(`projects/${projectId}/agents`).once('value');
+    const agents = agentsSnap.val() || {};
+    const groupAgents = Object.entries(agents)
+      .filter(([, a]) => a.agentGroup === agentGroup)
+      .map(([id, a]) => ({ id, ...a }));
+
+    const allDone = groupAgents.every(a => a.status === 'completed' || a.status === 'failed');
+    if (!allDone) return;
+
+    // All agents in group finished — trigger main LLM supervision
+    const total = groupAgents.length;
+    const done = groupAgents.filter(a => a.status === 'completed').length;
+    const failed = groupAgents.filter(a => a.status === 'failed').length;
+
+    // Build supervision summary
+    const summaryParts = groupAgents.map(a =>
+      `[Agent: ${a.id}]\nTask: ${a.task}\nStatus: ${a.status}\nResult: ${(a.result || '(no result)').slice(0, 2000)}`
+    );
+    const summary = `Agent group "${agentGroup}" completed.\n${done}/${total} succeeded, ${failed}/${total} failed.\n\nResults:\n${summaryParts.join('\n\n---\n\n')}`;
+
+    // Find the main task that spawned this group
+    // The main LLM conversation is at the project chat or an automation task
+    // Store supervision summary at group path for retrieval
+    const groupRef = gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`);
+    await groupRef.set({
+      agentGroup,
+      status: 'completed',
+      summary,
+      total, done, failed,
+      completedAt: Date.now()
+    });
+
+    // Trigger background main LLM review
+    await processAgentGroupReview(uid, projectId, agentGroup, summary);
+  } catch (e) {
+    console.error('⚠ Agent group supervision error:', e.message);
+  }
+}
+
+async function processAgentGroupReview(uid, projectId, agentGroup, summary) {
+  try {
+    const p = await getProject(uid, projectId);
+    if (!p) return;
+
+    const chatHistory = await getProjectChat(projectId, 30);
+    const conversationMessages = chatHistory.map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: m.content
+    }));
+
+    // Add supervision as user message
+    conversationMessages.push({
+      role: 'user',
+      content: `📊 SUPERVISION REQUIRED
+
+Agent group "${agentGroup}" has completed all tasks.
+
+${summary}
+
+Please review every result carefully. Check:
+1. Are all components compatible with each other?
+2. Are any files missing or incomplete?
+3. If everything works → send completion email via GMAIL_SEND with user's email from memory
+4. If issues found → spawn new SPAWN_AGENT to fix them
+5. If you need user input → use ASK_USER
+6. When everything is perfect and email sent → respond with [MARK_COMPLETE]{"agentGroup":"${agentGroup}"}[/MARK_COMPLETE]`
+    });
+
+    const files = await listFiles(projectId);
+    const fileList = Object.values(files).map(f => `${f.path || f.name} (${f.language || 'unknown'}, ${f.size || 0} bytes)`).join('\n');
+
+    let agentType = 'openai';
+    try {
+      const userSnap = await gmailDb().ref(`users/${uid}/prefs/agent`).once('value');
+      if (userSnap.val()) agentType = userSnap.val();
+    } catch {}
+
+    const ratings = await getAgentRating(agentType);
+    const ratingStr = `Agent "${agentType}": ${ratings.totalTasks > 0 ? `rating=${ratings.avgRating.toFixed(2)}/5, tasks=${ratings.totalTasks}, success=${ratings.successCount}, errors=${ratings.errorCount}` : 'no rating data yet'}`;
+
+    const systemMsg = {
+      role: 'system',
+      content: `You are a coding assistant working INSIDE the project "${p.name}". You are reviewing results from your sub-agent team.
+
+CRITICAL RULES:
+• You are the MAIN agent — review sub-agent work and ensure everything is compatible
+• Use CODE_WRITE/CODE_EDIT to fix any integration issues
+• Use SPAWN_AGENT to delegate fix tasks
+• When ALL issues are resolved, use GMAIL_SEND to email the user
+• Use ASK_USER if you need input
+• Use [MARK_COMPLETE] to mark the supervision as done when email is sent and everything is perfect
+• Use [AGENT_RESULT]...[/AGENT_RESULT] to return your review result
+
+Project: ${p.name}
+${fileList ? `\nFiles in project:\n${fileList}` : ''}
+${ratingStr}
+
+Available markers:
+[CODE_WRITE]{"path":"src/index.js","content":"..."}[/CODE_WRITE]
+[CODE_READ]{"path":"src/index.js"}[/CODE_READ]
+[CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]
+[CODE_DELETE]{"path":"src/old.js"}[/CODE_DELETE]
+[CODE_GLOB]{"pattern":"src/**/*.js"}[/CODE_GLOB]
+[CODE_GREP]{"pattern":"function","path":"src"}[/CODE_GREP]
+[CODE_EXEC]{"command":"npm test"}[/CODE_EXEC]
+[SPAWN_AGENT]{"task":"Fix login bug","model":"openai","agentGroup":"review_fixes"}[/SPAWN_AGENT]
+[GMAIL_SEND]{"to":"user@email.com","subject":"Done","body":"Project complete!"}[/GMAIL_SEND]
+[ASK_USER]Question for user?[/ASK_USER]
+[MARK_COMPLETE]{"agentGroup":"group_id"}[/MARK_COMPLETE]
+[AGENT_RESULT]My review result...[/AGENT_RESULT]`
+    };
+
+    const allMessages = [systemMsg, ...conversationMessages];
+
+    let response = '';
+    try {
+      response = await callModelBackend(agentType, allMessages);
+    } catch {
+      response = await callModelBackend('openai', allMessages);
+    }
+
+    // Process markers from the review response
+    const processed = await processMarkers(response, uid, projectId);
+    const cleanResponse = processed.cleanText;
+
+    // Check for MARK_COMPLETE marker
+    const completeMatch = response.match(/\[MARK_COMPLETE\]([\s\S]*?)\[\/MARK_COMPLETE\]/);
+
+    // Store the review response in chat
+    const chatRef = gmailDb().ref(`projects/${projectId}/chat`).push();
+    await chatRef.set({
+      role: 'assistant',
+      content: cleanResponse,
+      timestamp: Date.now(),
+      agentReview: true,
+      isComplete: !!completeMatch
+    });
+
+    // If completed, mark the group as finalized
+    if (completeMatch) {
+      const groupRef = gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`);
+      await groupRef.update({ finalized: true, finalizedAt: Date.now() });
+    }
+  } catch (e) {
+    console.error('⚠ Agent group review error:', e.message);
   }
 }
 
@@ -1797,8 +1962,11 @@ CRITICAL RULES:
 • Any file content you describe in plain text will NOT be saved. You MUST use the CODE_WRITE marker for every single file.
 • After using CODE_WRITE, the file will appear in the project file list automatically.
 • Use CODE_PROJECT_CREATE ONLY if the user explicitly asks to start a brand new project.
-• Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents.
+• Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents — they run in background 24x7.
+• Use SPAWN_AGENT with agentGroup to group related agents (e.g., "build_ai_chatbot") so you can review them together.
+• After spawning a group, the system will automatically recall you with all results for review when they're done.
 • Use ASK_USER to ask the user questions when you need decisions.
+• Use GMAIL_SEND to email the user (email should be from SAVE_MEMORY).
 Keep responses concise and focused.
 
 Project: ${p.name}
@@ -1817,8 +1985,9 @@ Available markers (use EXACT format with square brackets):
 [CODE_GREP]{"pattern":"function","path":"src"}[/CODE_GREP]
 [CODE_EXEC]{"command":"npm test"}[/CODE_EXEC]
 [CODE_GIT]{"command":"status"}[/CODE_GIT]
-[SPAWN_AGENT]{"task":"Write unit tests for src/utils.js","model":"openai"}[/SPAWN_AGENT]
+[SPAWN_AGENT]{"task":"Build React frontend for login page","model":"openai","agentGroup":"build_ai_chatbot"}[/SPAWN_AGENT]    ← Use agentGroup for group tracking!
 [CHECK_AGENT]{"sessionId":"agent_xxx"}[/CHECK_AGENT]
+[GMAIL_SEND]{"to":"user@email.com","subject":"Project Complete","body":"Your AI chatbot is ready!"}[/GMAIL_SEND]
 [ASK_USER]What database should I use?[/ASK_USER]
 [CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]    ← Only for new projects
 [CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]
@@ -2689,6 +2858,7 @@ const MARKER_RE = {
    CODE_PROJECT_CREATE: /\[CODE_PROJECT_CREATE\]([\s\S]*?)\[\/CODE_PROJECT_CREATE\]/gs,
    CODE_PROJECT_LIST:   /\[CODE_PROJECT_LIST\]([\s\S]*?)\[\/CODE_PROJECT_LIST\]/gs,
    CODE_PROJECT_DELETE: /\[CODE_PROJECT_DELETE\]([\s\S]*?)\[\/CODE_PROJECT_DELETE\]/gs,
+   MARK_COMPLETE:      /\[MARK_COMPLETE\]([\s\S]*?)\[\/MARK_COMPLETE\]/gs,
  };
 
 async function processMarkers(text, uid, projectId = null) {
@@ -3816,8 +3986,10 @@ async function processMarkers(text, uid, projectId = null) {
         const sessionId = `agent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
         const model = p.model || 'openai';
         const type = p.type || 'sub-agent';
-        await spawnSubAgent(uid, effId, sessionId, p.task, model, type);
-        cleanText = cleanText.replace(raw, `🤖 Spawned agent (ID: ${sessionId}) for task: ${p.task.slice(0, 60)}...\nProgress: /api/projects/${effId}/agents/${sessionId}`);
+        const agentGroup = p.agentGroup || null;
+        await spawnSubAgent(uid, effId, sessionId, p.task, model, type, agentGroup);
+        const groupNote = agentGroup ? ` (group: ${agentGroup})` : '';
+        cleanText = cleanText.replace(raw, `🤖 Spawned agent${groupNote} (ID: ${sessionId}) for task: ${p.task.slice(0, 60)}...\nProgress: /api/projects/${effId}/agents/${sessionId}`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Spawn agent error: ${e.message}`); }
     } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ SPAWN_AGENT requires a project context`);
@@ -3984,6 +4156,16 @@ async function processMarkers(text, uid, projectId = null) {
         await gmailDb().ref(`projects/${p.projectId}`).remove();
         cleanText = cleanText.replace(raw, `✅ Project deleted: ${p.projectId}`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Project delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── MARK_COMPLETE ──
+  { let m; while ((m = MARKER_RE.MARK_COMPLETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.agentGroup) {
+      cleanText = cleanText.replace(raw, `✅ Marked agent group "${p.agentGroup}" as complete.`);
     }
   }}
 
@@ -5588,7 +5770,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\n[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]\n[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]\n[CODE_WRITE]{"path":"file.js","content":"code","projectId":"proj_xxx"}[/CODE_WRITE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML. To work with projects, first create one with CODE_PROJECT_CREATE, then use CODE_*/SPAWN_AGENT markers with the "projectId" field set to the returned project ID.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\n[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]\n[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]\n[SPAWN_AGENT]{"task":"Build frontend","model":"openai","agentGroup":"my_group","projectId":"proj_xxx"}[/SPAWN_AGENT]\n[CODE_WRITE]{"path":"file.js","content":"code","projectId":"proj_xxx"}[/CODE_WRITE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML. To work with projects, first create one with CODE_PROJECT_CREATE, then use CODE_*/SPAWN_AGENT markers with the "projectId" field. Use "agentGroup" with SPAWN_AGENT to group related sub-agents for automatic supervision review when all complete.`;
   const completeHint = (task.type !== 'scheduled' && task.type !== 'continuous') ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
@@ -5680,6 +5862,25 @@ async function executeDueTasks() {
           const retryInterval = task.type === 'continuous' ? (task.interval || 60000) : 7200000;
           await gmailDb().ref(`tasks/${uid}/${taskId}/nextRun`).set(now + retryInterval);
           executed.push({ uid, taskId, status: 'failed', error: taskErr.message });
+        }
+      }
+    }
+
+    // Also check for pending/queued sub-agents across all projects
+    const allProjectsSnap = await gmailDb().ref('projects').once('value');
+    const allProjects = allProjectsSnap.val() || {};
+    for (const [pid, project] of Object.entries(allProjects)) {
+      if (!project.agents) continue;
+      for (const [sessionId, agent] of Object.entries(project.agents)) {
+        // Execute queued agents that haven't started
+        if (agent.status === 'queued' && !agent.startedAt) {
+          try {
+            await gmailDb().ref(`projects/${pid}/agents/${sessionId}/startedAt`).set(now);
+            executed.push({ pid, sessionId, task: agent.task, status: 'started' });
+            // executeSubAgent will be called by spawnSubAgent — this is just a safety net
+          } catch (e) {
+            console.error(`⏰ Sub-agent ${sessionId} start error:`, e.message);
+          }
         }
       }
     }
