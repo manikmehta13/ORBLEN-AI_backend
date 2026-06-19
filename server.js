@@ -657,47 +657,75 @@ app.post("/api/docs/create", async (req, res) => {
   }
 });
 
-function markdownToDocsRequests(md) {
-  const lines = md.split('\n');
+function markdownToDocsRequests(md, startPos = 1) {
+  const STYLES = { 1: 'HEADING_1', 2: 'HEADING_2', 3: 'HEADING_3' };
   const requests = [];
-  let pos = 1;
-  for (const raw of lines) {
-    let line = raw;
-    let heading = 0, isBullet = false, isNumbered = false;
-    const hm = line.match(/^(#{1,3})\s+/);
-    if (hm) { heading = hm[1].length; line = line.slice(hm[0].length); }
-    const bm = line.match(/^[-*]\s+/);
-    if (bm) { isBullet = true; line = line.slice(bm[0].length); }
-    const nm = line.match(/^\d+[.)]\s+/);
-    if (nm) { isNumbered = true; line = line.slice(nm[0].length); }
-    const spans = [];
-    let clean = '', i = 0;
-    while (i < line.length) {
-      if (line.slice(i, i + 2) === '**') {
-        const e = line.indexOf('**', i + 2);
-        if (e !== -1) { spans.push({ s: clean.length, e: clean.length + (e - i - 2), b: true }); clean += line.slice(i + 2, e); i = e + 2; continue; }
-      }
-      if (line[i] === '*' && line.slice(i, i + 2) !== '**') {
-        const e = line.indexOf('*', i + 1);
-        if (e !== -1 && line.slice(e, e + 2) !== '**') { spans.push({ s: clean.length, e: clean.length + (e - i - 1), i: true }); clean += line.slice(i + 1, e); i = e + 1; continue; }
-      }
-      clean += line[i]; i++;
+  let pos = startPos;
+
+  function parseInline(s) {
+    const out = [];
+    let r = s;
+    while (r.length) {
+      const m = r.match(/(\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/);
+      if (!m) { out.push({ t: r }); break; }
+      if (m.index > 0) out.push({ t: r.slice(0, m.index) });
+      const f = m[0];
+      if (f.startsWith('***')) out.push({ t: m[2], b: 1, i: 1 });
+      else if (f.startsWith('**')) out.push({ t: m[3], b: 1 });
+      else if (f.startsWith('*') && f.endsWith('*') && !f.endsWith('**')) out.push({ t: m[4], i: 1 });
+      else if (f.startsWith('`')) out.push({ t: m[5], c: 1 });
+      else if (f.startsWith('[')) out.push({ t: m[6], l: m[7] });
+      else out.push({ t: f });
+      r = r.slice(m.index + f.length);
     }
-    if (heading === 0 && !isBullet && !isNumbered && raw.trim() === '') { clean = ''; }
-    const text = clean + '\n';
-    const start = pos;
-    requests.push({ insertText: { location: { index: start }, text } });
-    const end = start + text.length;
-    if (heading) requests.push({ updateParagraphStyle: { range: { startIndex: start, endIndex: end }, paragraphStyle: { namedStyleType: `HEADING_${heading}` }, fields: "namedStyleType" } });
-    if (isBullet) requests.push({ createParagraphBullets: { range: { startIndex: start, endIndex: end }, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE" } });
-    if (isNumbered) requests.push({ createParagraphBullets: { range: { startIndex: start, endIndex: end }, bulletPreset: "NUMBERED_DECIMAL_ALPHA_ROMAN" } });
-    for (const sp of spans) {
-      const ts = {};
-      if (sp.b) ts.bold = true;
-      if (sp.i) ts.italic = true;
-      requests.push({ updateTextStyle: { range: { startIndex: start + sp.s, endIndex: start + sp.e }, textStyle: ts, fields: Object.keys(ts).join(',') } });
+    return out;
+  }
+
+  function addFormatReqs(reqs, segs, basePos) {
+    let cp = basePos;
+    for (const seg of segs) {
+      const end = cp + seg.t.length;
+      if (seg.b) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { bold: true }, fields: 'bold' } });
+      if (seg.i) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { italic: true }, fields: 'italic' } });
+      if (seg.c) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { fontFamily: 'Consolas', fontSize: { magnitude: 9, unit: 'PT' } }, fields: 'fontFamily,fontSize' } });
+      if (seg.l) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { link: { url: seg.l } }, fields: 'link' } });
+      cp = end;
     }
-    pos = end;
+  }
+
+  for (const rawLine of md.split('\n')) {
+    const line = rawLine;
+    if (/^-{3,}$/.test(line.trim())) {
+      requests.push({ insertText: { location: { index: pos }, text: '\n' } });
+      pos++;
+      continue;
+    }
+    const hM = line.match(/^(#{1,3})\s+(.*)/);
+    if (hM) {
+      const lvl = hM[1].length;
+      const segs = parseInline(hM[2]);
+      const txt = segs.map(s => s.t).join('') + '\n';
+      requests.push({ insertText: { location: { index: pos }, text: txt } });
+      requests.push({ updateParagraphStyle: { range: { startIndex: pos, endIndex: pos + txt.length - 1 }, paragraphStyle: { namedStyleType: STYLES[lvl] }, fields: 'namedStyleType' } });
+      addFormatReqs(requests, segs, pos);
+      pos += txt.length;
+      continue;
+    }
+    const lM = line.match(/^[\-\*]\s+(.*)/);
+    const content = lM ? lM[1] : line;
+
+    if (!lM && !content) {
+      requests.push({ insertText: { location: { index: pos }, text: '\n' } });
+      pos++;
+      continue;
+    }
+
+    const segs = parseInline(content);
+    const prefix = lM ? '• ' : '';
+    const txt = prefix + segs.map(s => s.t).join('') + '\n';
+    requests.push({ insertText: { location: { index: pos }, text: txt } });
+    addFormatReqs(requests, segs, pos + prefix.length);
+    pos += txt.length;
   }
   return requests;
 }
@@ -816,7 +844,7 @@ async function getSlidesAccessToken(uid) {
   return refreshed.accessToken;
 }
 
-function slideContentToRequests(slides) {
+function slideContentToRequests(slides, prefix = 'nx') {
   if (typeof slides === 'string') {
     slides = slides.split(/\n?---\n?/).map(s => s.trim()).filter(Boolean);
   }
@@ -852,9 +880,10 @@ function slideContentToRequests(slides) {
     }
     return { clean: clean.replace(/\n$/, ''), spans };
   }
+  const timestamp = Date.now();
   slides.forEach((text, idx) => {
-    const slideId = `nx_slide_${idx}`;
-    const shapeId = `nx_shape_${idx}`;
+    const slideId = `${prefix}_slide_${idx}_${timestamp}`;
+    const shapeId = `${prefix}_shape_${idx}_${timestamp}`;
     requests.push({ createSlide: { objectId: slideId, insertionIndex: idx, slideLayoutReference: { predefinedLayout: "BLANK" } } });
     requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
     const { clean, spans } = parseText(text);
@@ -2302,61 +2331,6 @@ async function processMarkers(text, uid) {
     return null;
   }
 
-  function markdownToDocsRequests(md) {
-    const STYLES = { 1: 'HEADING_1', 2: 'HEADING_2', 3: 'HEADING_3' };
-    const reqs = []; let pos = 1;
-    for (const rawLine of md.split('\n')) {
-      const line = rawLine;
-      if (/^-{3,}$/.test(line.trim())) { pos++; continue; }
-      const hM = line.match(/^(#{1,3})\s+(.*)/);
-      if (hM) {
-        const lvl = hM[1].length;
-        const segs = parseInline(hM[2]);
-        const txt = segs.map(s => s.t).join('') + '\n';
-        reqs.push({ insertText: { location: { index: pos } }, text: txt });
-        reqs.push({ updateParagraphStyle: { range: { startIndex: pos, endIndex: pos + txt.length - 1 }, paragraphStyle: { namedStyleType: STYLES[lvl] }, fields: 'namedStyleType' } });
-        addFormatReqs(reqs, segs, pos); pos += txt.length; continue;
-      }
-      const lM = line.match(/^[\-\*]\s+(.*)/);
-      const content = lM ? lM[1] : line;
-      if (!content) { pos++; continue; }
-      const segs = parseInline(content);
-      const prefix = lM ? '• ' : '';
-      const txt = prefix + segs.map(s => s.t).join('') + '\n';
-      reqs.push({ insertText: { location: { index: pos } }, text: txt });
-      addFormatReqs(reqs, segs, pos + prefix.length); pos += txt.length;
-    }
-    return reqs;
-    function parseInline(s) {
-      const out = []; let r = s;
-      while (r.length) {
-        const m = r.match(/(\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/);
-        if (!m) { out.push({ t: r }); break; }
-        if (m.index > 0) out.push({ t: r.slice(0, m.index) });
-        const f = m[0];
-        if (f.startsWith('***')) out.push({ t: m[2], b: 1, i: 1 });
-        else if (f.startsWith('**')) out.push({ t: m[3], b: 1 });
-        else if (f.startsWith('*') && f.endsWith('*') && !f.endsWith('**')) out.push({ t: m[4], i: 1 });
-        else if (f.startsWith('`')) out.push({ t: m[5], c: 1 });
-        else if (f.startsWith('[')) out.push({ t: m[6], l: m[7] });
-        else out.push({ t: f });
-        r = r.slice(m.index + f.length);
-      }
-      return out;
-    }
-    function addFormatReqs(reqs, segs, basePos) {
-      let cp = basePos;
-      for (const seg of segs) {
-        const end = cp + seg.t.length;
-        if (seg.b) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { bold: true }, fields: 'bold' } });
-        if (seg.i) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { italic: true }, fields: 'italic' } });
-        if (seg.c) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { fontFamily: 'Consolas', fontSize: { magnitude: 9, unit: 'PT' } }, fields: 'fontFamily,fontSize' } });
-        if (seg.l) reqs.push({ updateTextStyle: { range: { startIndex: cp, endIndex: end }, textStyle: { link: { url: seg.l } } }, fields: 'link' });
-        cp = end;
-      }
-    }
-  }
-
   function markdownToHtml(s) {
     // Escape HTML entities first
     let h = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2450,17 +2424,27 @@ async function processMarkers(text, uid) {
         });
         const data = await searchRes.json();
         if (searchRes.ok && data.messages?.length) {
-          const details = (await Promise.all(data.messages.slice(0, 10).map(async (msg) => {
+          const rows = (await Promise.all(data.messages.slice(0, 10).map(async (msg) => {
             try {
               const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
                 headers: { Authorization: `Bearer ${token}` }
               });
               const d = await r.json();
               const hdrs = (d.payload?.headers || []).reduce((a, h) => { a[h.name] = h.value; return a; }, {});
-              return `[ID:${msg.id}] From: ${hdrs.From || ''} | Subject: ${hdrs.Subject || ''} | Date: ${hdrs.Date || ''} | Snippet: ${(d.snippet || '').slice(0, 100)}`;
+              const cleanFrom = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const cleanSubject = hdrs.Subject || '(No Subject)';
+              const cleanDate = hdrs.Date ? hdrs.Date.split(' ').slice(0, 4).join(' ') : '';
+              const snippet = d.snippet || '';
+              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${snippet} | \`${msg.id}\` |`;
             } catch { return null; }
-          }))).filter(Boolean).join('\n');
-          cleanText = cleanText.replace(raw, `📧 Gmail search results for "${p.query}":\n${details}`);
+          }))).filter(Boolean);
+          const table = [
+            `### 📧 Gmail Search Results for "${p.query}"`,
+            `| From & Date | Subject & Snippet | ID |`,
+            `| :--- | :--- | :--- |`,
+            ...rows
+          ].join('\n');
+          cleanText = cleanText.replace(raw, table);
         } else {
           cleanText = cleanText.replace(raw, `📧 No emails found for "${p.query}"`);
         }
@@ -2489,7 +2473,18 @@ async function processMarkers(text, uid) {
             if (pp.parts) parts.push(...pp.parts);
             if (pp.mimeType === 'text/plain' && pp.body?.data) { body = Buffer.from(pp.body.data, 'base64').toString('utf-8'); break; }
           }
-          cleanText = cleanText.replace(raw, `📧 Email from: ${hdrs.From || ''}\nSubject: ${hdrs.Subject || ''}\nDate: ${hdrs.Date || ''}\n\n${body.slice(0, 2000)}`);
+          const from = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const cleanBody = body.slice(0, 3000).split('\n').map(line => `> ${line}`).join('\n');
+          const emailCard = [
+            `### 📧 Email: ${hdrs.Subject || '(No Subject)'}`,
+            `> **From:** ${from}`,
+            `> **Date:** ${hdrs.Date || ''}`,
+            `> **ID:** \`${data.id}\``,
+            `>`,
+            `---`,
+            cleanBody
+          ].join('\n');
+          cleanText = cleanText.replace(raw, emailCard);
         } else {
           cleanText = cleanText.replace(raw, `⚠ Gmail read failed: ${data.error?.message || readRes.statusText}`);
         }
@@ -2512,8 +2507,17 @@ async function processMarkers(text, uid) {
       });
       const data = await listRes.json();
       if (listRes.ok && data.files?.length) {
-        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Modified: ${f.modifiedTime || ''} | Owner: ${f.owners?.[0]?.displayName || ''}`).join('\n');
-        cleanText = cleanText.replace(raw, `📝 Documents (${data.files.length}):\n${details}`);
+        const rows = data.files.map(f => {
+          const mod = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : '—';
+          return `| **${f.name}** | ${f.owners?.[0]?.displayName || '—'} | ${mod} | \`${f.id}\` |`;
+        });
+        const table = [
+          `### 📝 Google Documents (${data.files.length})`,
+          `| Document Name | Owner | Last Modified | ID |`,
+          `| :--- | :--- | :--- | :--- |`,
+          ...rows
+        ].join('\n');
+        cleanText = cleanText.replace(raw, table);
       } else {
         cleanText = cleanText.replace(raw, `📝 No documents found${p?.query ? ' for "' + p.query + '"' : ''}`);
       }
@@ -2591,28 +2595,35 @@ async function processMarkers(text, uid) {
         const token = await getDocsAccessToken(uid);
         const docId = p.id || p.eventId;
         const reqs = [];
-        if (p.mode === 'replace') {
-          const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const docData = await docRes.json();
-          if (docRes.ok) {
-            const endIdx = docData.body?.content?.[docData.body.content.length - 1]?.endIndex;
-            if (endIdx && endIdx > 1) reqs.push({ deleteContentRange: { range: { startIndex: 1, endIndex } } });
+        let startPos = 1;
+
+        // Fetch document first to get the actual endIndex
+        const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const docData = await docRes.json();
+        if (docRes.ok) {
+          const endIdx = docData.body?.content?.[docData.body.content.length - 1]?.endIndex;
+          if (p.mode === 'replace') {
+            if (endIdx && endIdx > 1) {
+              reqs.push({ deleteContentRange: { range: { startIndex: 1, endIndex: endIdx } } });
+            }
+            startPos = 1;
+          } else {
+            // Append at the end of document
+            startPos = (endIdx && endIdx > 1) ? endIdx - 1 : 1;
           }
         }
-        const lines = p.content.split('\n');
-        let pos = 1;
-        for (const rawLine of lines) {
-          const text = rawLine + '\n';
-          reqs.push({ insertText: { location: { index: pos }, text } });
-          pos += text.length;
-        }
+
+        reqs.push(...markdownToDocsRequests(p.content, startPos));
+
         if (reqs.length) {
-          await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}:batchUpdate`, {
+          const writeRes = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}:batchUpdate`, {
             method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body: JSON.stringify({ requests: reqs })
           });
+          const writeData = await writeRes.json();
+          if (!writeRes.ok) throw new Error(writeData.error?.message || writeRes.statusText);
         }
         cleanText = cleanText.replace(raw, `✅ Document updated (ID: ${docId})`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Docs write error: ${e.message}`); }
@@ -2670,10 +2681,19 @@ async function processMarkers(text, uid) {
       });
       const data = await listRes.json();
       if (listRes.ok && data.files?.length) {
-        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Modified: ${f.modifiedTime || ''}`).join('\n');
-        cleanText = cleanText.replace(raw, `📽 Presentations (${data.files.length}):\n${details}`);
+        const rows = data.files.map(f => {
+          const mod = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : '—';
+          return `| **${f.name}** | ${f.owners?.[0]?.displayName || '—'} | ${mod} | \`${f.id}\` |`;
+        });
+        const table = [
+          `### 📽️ Google Slides (${data.files.length})`,
+          `| Presentation Name | Owner | Last Modified | ID |`,
+          `| :--- | :--- | :--- | :--- |`,
+          ...rows
+        ].join('\n');
+        cleanText = cleanText.replace(raw, table);
       } else {
-        cleanText = cleanText.replace(raw, `📽 No presentations found${p?.query ? ' for "' + p.query + '"' : ''}`);
+        cleanText = cleanText.replace(raw, `📽️ No presentations found${p?.query ? ' for "' + p.query + '"' : ''}`);
       }
     } catch (e) { cleanText = cleanText.replace(raw, `⚠ Slides list error: ${e.message}`); }
   }}
@@ -2719,17 +2739,8 @@ async function processMarkers(text, uid) {
         if (createRes.ok) {
           let slideCount = 0;
           if (p.slides) {
-            const slidesArr = Array.isArray(p.slides) ? p.slides : p.slides.split(/\n?---\n?/).filter(Boolean);
-            slideCount = slidesArr.length;
-            const requests = [];
-            slidesArr.forEach((text, i) => {
-              const slideId = `auto_${i}`;
-              const shapeId = `auto_shape_${i}`;
-              requests.push({ createSlide: { objectId: slideId, insertionIndex: i, slideLayoutReference: { predefinedLayout: "BLANK" } } });
-              requests.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
-              const cleanText2 = typeof text === 'string' ? text.replace(/^#{1,3}\s+/, '').replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '') : '';
-              if (cleanText2) requests.push({ insertText: { objectId: shapeId, text: cleanText2, insertionIndex: 0 } });
-            });
+            const requests = slideContentToRequests(p.slides, 'auto');
+            slideCount = Array.isArray(p.slides) ? p.slides.length : p.slides.split(/\n?---\n?/).filter(Boolean).length;
             if (requests.length) {
               await fetch(`https://slides.googleapis.com/v1/presentations/${data.presentationId}:batchUpdate`, {
                 method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -2763,15 +2774,7 @@ async function processMarkers(text, uid) {
           const presData = await presRes.json();
           if (presRes.ok) (presData.slides || []).forEach(s => reqs.push({ deleteObject: { objectId: s.objectId } }));
         }
-        const slidesArr = Array.isArray(p.slides) ? p.slides : p.slides.split(/\n?---\n?/).filter(Boolean);
-        slidesArr.forEach((text, i) => {
-          const slideId = `auto_${Date.now()}_${i}`;
-          const shapeId = `auto_shape_${i}`;
-          reqs.push({ createSlide: { objectId: slideId, insertionIndex: i, slideLayoutReference: { predefinedLayout: "BLANK" } } });
-          reqs.push({ createShape: { objectId: shapeId, shapeType: "TEXT_BOX", elementProperties: { pageObjectId: slideId, size: { width: { magnitude: 660, unit: "PT" }, height: { magnitude: 450, unit: "PT" } }, transform: { scaleX: 1, scaleY: 1, translateX: 30, translateY: 30, unit: "PT" } } } });
-          const ct = typeof text === 'string' ? text.replace(/^#{1,3}\s+/, '').replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '') : '';
-          if (ct) reqs.push({ insertText: { objectId: shapeId, text: ct, insertionIndex: 0 } });
-        });
+        reqs.push(...slideContentToRequests(p.slides, 'auto'));
         if (reqs.length) {
           await fetch(`https://slides.googleapis.com/v1/presentations/${encodeURIComponent(presId)}:batchUpdate`, {
             method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -2827,15 +2830,24 @@ async function processMarkers(text, uid) {
     try {
       const token = await getSheetsAccessToken(uid);
       const q = encodeURIComponent(p?.query
-        ? `name contains '${p.query.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet'`
+        ? `name contains '${p.query.replace(/'/g, "\\'")}'  and mimeType='application/vnd.google-apps.spreadsheet'`
         : "mimeType='application/vnd.google-apps.spreadsheet'");
       const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,modifiedTime,owners)&pageSize=${Math.min(p?.maxResults || 10, 50)}&orderBy=modifiedTime desc`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await listRes.json();
       if (listRes.ok && data.files?.length) {
-        const details = data.files.map(f => `[ID:${f.id}] ${f.name} | Owner: ${f.owners?.[0]?.displayName || ''}`).join('\n');
-        cleanText = cleanText.replace(raw, `📊 Spreadsheets (${data.files.length}):\n${details}`);
+        const rows = data.files.map(f => {
+          const mod = f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : '—';
+          return `| **${f.name}** | ${f.owners?.[0]?.displayName || '—'} | ${mod} | \`${f.id}\` |`;
+        });
+        const table = [
+          `### 📊 Google Sheets (${data.files.length})`,
+          `| Spreadsheet Name | Owner | Last Modified | ID |`,
+          `| :--- | :--- | :--- | :--- |`,
+          ...rows
+        ].join('\n');
+        cleanText = cleanText.replace(raw, table);
       } else {
         cleanText = cleanText.replace(raw, `📊 No spreadsheets found${p?.query ? ' for "' + p.query + '"' : ''}`);
       }
@@ -2857,8 +2869,28 @@ async function processMarkers(text, uid) {
         const data = await readRes.json();
         if (readRes.ok) {
           const vals = data.values || [];
-          const preview = vals.slice(0, 20).map(row => (Array.isArray(row) ? row.join(' | ') : String(row))).join('\n');
-          cleanText = cleanText.replace(raw, `📊 Sheet data (${vals.length} rows):\n${preview}`);
+          // Build a markdown table from cell values
+          if (vals.length) {
+            const maxCols = Math.max(...vals.map(r => r.length));
+            const pad = (cell) => String(cell || '').replace(/\|/g, '\\|');
+            const [header, ...body] = vals.slice(0, 30);
+            const paddedHeader = Array.from({ length: maxCols }, (_, i) => pad(header?.[i] ?? ''));
+            const separator = Array.from({ length: maxCols }, () => ':---');
+            const bodyRows = body.map(row => {
+              const padded = Array.from({ length: maxCols }, (_, i) => pad(row[i] ?? ''));
+              return `| ${padded.join(' | ')} |`;
+            });
+            const table = [
+              `### 📊 Sheet Data (${vals.length} rows, range: ${p.range || 'A1:ZZ'})`,
+              `| ${paddedHeader.join(' | ')} |`,
+              `| ${separator.join(' | ')} |`,
+              ...bodyRows,
+              vals.length > 30 ? `*… and ${vals.length - 30} more rows*` : ''
+            ].filter(Boolean).join('\n');
+            cleanText = cleanText.replace(raw, table);
+          } else {
+            cleanText = cleanText.replace(raw, `📊 Sheet is empty (range: ${p.range || 'A1:ZZ'})`);
+          }
         } else {
           cleanText = cleanText.replace(raw, `⚠ Sheets read failed: ${data.error?.message || readRes.statusText}`);
         }
@@ -2976,8 +3008,28 @@ async function processMarkers(text, uid) {
       });
       const data = await listRes.json();
       if (listRes.ok && data.items?.length) {
-        const details = data.items.map(e => `[ID:${e.id}] ${e.summary || '(no title)'} | Start: ${e.start?.dateTime || e.start?.date || '—'} | End: ${e.end?.dateTime || e.end?.date || '—'} | Status: ${e.status || 'confirmed'}`).join('\n');
-        cleanText = cleanText.replace(raw, `📅 Events (${data.items.length}):\n${details}`);
+        const formatDT = (dt, d) => {
+          if (dt) {
+            const parsed = new Date(dt);
+            return parsed.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+          }
+          return d || '—';
+        };
+        const statusIcon = (s) => s === 'cancelled' ? '❌' : s === 'tentative' ? '❓' : '✅';
+        const rows = data.items.map(e => {
+          const start = formatDT(e.start?.dateTime, e.start?.date);
+          const end = formatDT(e.end?.dateTime, e.end?.date);
+          const status = `${statusIcon(e.status)} ${e.status || 'confirmed'}`;
+          const title = (e.summary || '(no title)').replace(/\|/g, '\\|');
+          return `| **${title}** | ${start} | ${end} | ${status} | \`${e.id}\` |`;
+        });
+        const table = [
+          `### 📅 Calendar Events (${data.items.length})`,
+          `| Event | Start | End | Status | ID |`,
+          `| :--- | :--- | :--- | :--- | :--- |`,
+          ...rows
+        ].join('\n');
+        cleanText = cleanText.replace(raw, table);
       } else {
         cleanText = cleanText.replace(raw, `📅 No upcoming events found.`);
       }
@@ -3115,18 +3167,21 @@ async function processMarkers(text, uid) {
         if (!persons.length) {
           cleanText = cleanText.replace(raw, `📇 No contacts${label ? ' matching ' + label : ''}.`);
         } else {
-          const blocks = persons.map((c, i) => {
+          const rows = persons.map(c => {
             const name = c.names?.[0]?.displayName || 'Unknown';
-            const lines = [`${i + 1}️⃣ ${name}`];
-            if (c.emailAddresses?.length) c.emailAddresses.forEach(e => lines.push(`   📧 ${e.value}`));
-            if (c.phoneNumbers?.length) c.phoneNumbers.forEach(n => lines.push(`   📞 ${n.value}${n.type ? ' (' + n.type + ')' : ''}`));
-            if (c.organizations?.length) c.organizations.forEach(o => lines.push(`   🏢 ${[o.name, o.title].filter(Boolean).join(' — ')}`));
-            if (c.addresses?.length) c.addresses.forEach(a => lines.push(`   🏠 ${a.formattedValue}`));
-            const id = c.resourceName?.replace('people/', '') || '';
-            lines.push(`   🆔 ${id.slice(0, 5)}…${id.slice(-4)}`);
-            return lines.join('\n');
+            const email = c.emailAddresses?.[0]?.value || '—';
+            const phone = c.phoneNumbers?.[0]?.value || '—';
+            const org = c.organizations?.[0] ? [c.organizations[0].name, c.organizations[0].title].filter(Boolean).join(' — ') : '—';
+            const id = c.resourceName || '';
+            return `| **${name}** | ${email} | ${phone} | ${org} | \`${id}\` |`;
           });
-          cleanText = cleanText.replace(raw, `📇 Contacts ${label}:\n${blocks.join('\n')}`);
+          const table = [
+            `### 📇 Contacts ${label}`,
+            `| Name | Email | Phone | Organization | Resource Name |`,
+            `| :--- | :--- | :--- | :--- | :--- |`,
+            ...rows
+          ].join('\n');
+          cleanText = cleanText.replace(raw, table);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People list error: ${e.message}`); }
     }
@@ -3144,23 +3199,24 @@ async function processMarkers(text, uid) {
         const data = await getRes.json();
         if (!getRes.ok) throw new Error(data.error?.message || getRes.statusText);
         const c = data;
-        const lines = ['📇 Contact Details:'];
-        if (c.names?.[0]) lines.push(`👤 ${c.names.map(n => n.displayName).join(', ')}`);
-        if (c.nicknames?.length) lines.push(`😄 ${c.nicknames.map(n => n.value).join(', ')}`);
-        if (c.emailAddresses?.length) c.emailAddresses.forEach(e => lines.push(`📧 ${e.value}${e.type ? ' (' + e.type + ')' : ''}`));
-        if (c.phoneNumbers?.length) c.phoneNumbers.forEach(n => lines.push(`📞 ${n.value}${n.type ? ' (' + n.type + ')' : ''}`));
-        if (c.addresses?.length) c.addresses.forEach(a => lines.push(`🏠 ${a.formattedValue}${a.type ? ' (' + a.type + ')' : ''}`));
+        const name = c.names?.map(n => n.displayName).join(', ') || 'Unknown';
+        const cardLines = [
+          `### 📇 Contact: ${name}`
+        ];
+        if (c.nicknames?.length) cardLines.push(`> **Nickname:** ${c.nicknames.map(n => n.value).join(', ')}`);
+        if (c.emailAddresses?.length) c.emailAddresses.forEach(e => cardLines.push(`> **Email:** ${e.value}${e.type ? ' *(' + e.type + ')*' : ''}`));
+        if (c.phoneNumbers?.length) c.phoneNumbers.forEach(n => cardLines.push(`> **Phone:** ${n.value}${n.type ? ' *(' + n.type + ')*' : ''}`));
+        if (c.addresses?.length) c.addresses.forEach(a => cardLines.push(`> **Address:** ${a.formattedValue}${a.type ? ' *(' + a.type + ')*' : ''}`));
         if (c.birthdays?.length) {
           const b = c.birthdays[0].date;
-          const bday = [b.month, b.day].join('/') + (b.year ? '/' + b.year : '');
-          lines.push(`🎂 ${bday}`);
+          const bday = [b.day, b.month].join('/') + (b.year ? '/' + b.year : '');
+          cardLines.push(`> **Birthday:** ${bday}`);
         }
-        if (c.organizations?.length) c.organizations.forEach(o => lines.push(`🏢 ${[o.name, o.title, o.department].filter(Boolean).join(' — ')}`));
-        if (c.biographies?.length) lines.push(`📝 ${c.biographies[0].value}`);
-        if (c.urls?.length) c.urls.forEach(u => lines.push(`🔗 ${u.value}`));
-        const id = c.resourceName?.replace('people/', '') || '';
-        lines.push(`🆔 ${id}`);
-        cleanText = cleanText.replace(raw, lines.join('\n'));
+        if (c.organizations?.length) c.organizations.forEach(o => cardLines.push(`> **Organization:** ${[o.name, o.title, o.department].filter(Boolean).join(' — ')}`));
+        if (c.biographies?.length) cardLines.push(`> **Bio:** ${c.biographies[0].value.slice(0, 300)}`);
+        if (c.urls?.length) c.urls.forEach(u => cardLines.push(`> **URL:** [${u.value}](${u.value})`));
+        cardLines.push(`> **Resource Name:** \`${c.resourceName || ''}\``);
+        cleanText = cleanText.replace(raw, cardLines.join('\n'));
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People get error: ${e.message}`); }
     }
   }}
