@@ -1469,8 +1469,10 @@ if (!require('fs').existsSync(PROJECTS_DIR)) require('fs').mkdirSync(PROJECTS_DI
 async function getProject(uid, pid) {
   const snap = await gmailDb().ref(`projects/${pid}`).once('value');
   const p = snap.val();
-  if (!p || p.owner !== uid) return null;
-  return { id: pid, ...p };
+  if (!p) return null;
+  const meta = p.metadata || {};
+  if (meta.owner !== uid) return null;
+  return { id: pid, ...meta };
 }
 async function setProject(pid, data) {
   await gmailDb().ref(`projects/${pid}/metadata`).update(data);
