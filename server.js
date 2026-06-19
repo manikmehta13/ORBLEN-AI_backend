@@ -4337,8 +4337,6 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
   let prompt = req.body.prompt;
   
   if (lowLatency) {
-    // In low-latency mode the frontend builds the exact system prompt;
-    // skip backend additions (response style, agentic search, critique).
     if (!messages) return res.status(400).json({ error: "messages required" });
   } else if (isGeminiOrCoherePrompt) {
     if (!prompt) return res.status(400).json({ error: "prompt required" });
@@ -4352,8 +4350,43 @@ async function handleAgenticChatRoute(req, res, agentName, isGeminiOrCoherePromp
     let chatMessages = messages;
     if (!lowLatency) {
       const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+      
+      // ── Memory + Skills injection (if authenticated) ──
+      let uid = null;
+      try {
+        uid = await getUserUid(req.headers.authorization);
+      } catch {}
+      if (uid) {
+        const injectParts = [];
+        // Memory
+        try {
+          const memSnap = await gmailDb().ref(`memories/${uid}`).once('value');
+          const mems = memSnap.val() || {};
+          const entries = Object.values(mems).filter(m => m.content);
+          if (entries.length) {
+            const formatted = entries.map(m => {
+              if (m.content.includes('\n')) return m.content.split('\n').filter(Boolean).map((line, i) => i === 0 ? line : '  ' + line).join('\n');
+              return m.content;
+            }).join('\n');
+            injectParts.push('[Your existing memories about the user]\n' + formatted);
+          }
+        } catch {}
+        // Skills
+        try {
+          const selected = selectSkills(lastUserMsg, { limit: 4 });
+          const ctx = buildSkillContext(selected);
+          if (ctx) injectParts.push(ctx);
+        } catch {}
+        if (injectParts.length) {
+          // Inject into the last user message
+          chatMessages = [...messages];
+          chatMessages[chatMessages.length - 1].content += '\n\n' + injectParts.join('\n\n');
+        }
+      }
+
+      // Web search
       const webContext = await executeAgenticSearch(agentName, lastUserMsg);
-      chatMessages = [...messages];
+      chatMessages = chatMessages || [...messages];
       if (webContext) {
         chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
       }
@@ -4405,8 +4438,38 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiOrCoher
     } else {
       sendEvent({ type: "status", message: "🔍 Searching the web…" });
       const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
-      const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
       chatMessages = [...messages];
+
+      // ── Memory + Skills injection (if authenticated) ──
+      let uid = null;
+      try {
+        uid = await getUserUid(req.headers.authorization);
+      } catch {}
+      if (uid) {
+        const injectParts = [];
+        try {
+          const memSnap = await gmailDb().ref(`memories/${uid}`).once('value');
+          const mems = memSnap.val() || {};
+          const entries = Object.values(mems).filter(m => m.content);
+          if (entries.length) {
+            const formatted = entries.map(m => {
+              if (m.content.includes('\n')) return m.content.split('\n').filter(Boolean).map((line, i) => i === 0 ? line : '  ' + line).join('\n');
+              return m.content;
+            }).join('\n');
+            injectParts.push('[Your existing memories about the user]\n' + formatted);
+          }
+        } catch {}
+        try {
+          const selected = selectSkills(lastUserMsg, { limit: 4 });
+          const ctx = buildSkillContext(selected);
+          if (ctx) injectParts.push(ctx);
+        } catch {}
+        if (injectParts.length) {
+          chatMessages[chatMessages.length - 1].content += '\n\n' + injectParts.join('\n\n');
+        }
+      }
+
+      const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
       if (webContext) {
         chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
       }
