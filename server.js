@@ -1801,6 +1801,12 @@ ${ratingStr}
 
 Available markers (use EXACT format with square brackets):
 
+Project management:
+[CODE_PROJECT_CREATE]{"name":"My Project","description":"Optional description"}[/CODE_PROJECT_CREATE]
+[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]
+[CODE_PROJECT_DELETE]{"projectId":"proj_xxx"}[/CODE_PROJECT_DELETE]
+
+File operations (all accept optional "projectId" field):
 [CODE_READ]{"path":"src/index.js"}[/CODE_READ]
 [CODE_WRITE]{"path":"src/index.js","content":"console.log('hello');"}[/CODE_WRITE]
 [CODE_EDIT]{"path":"src/index.js","oldString":"foo","newString":"bar"}[/CODE_EDIT]
@@ -2674,8 +2680,11 @@ const MARKER_RE = {
   CHECK_AGENT:     /\[CHECK_AGENT\](.*?)\[\/CHECK_AGENT\]/gs,
   TALK_TO_AGENT:   /\[TALK_TO_AGENT\](.*?)\[\/TALK_TO_AGENT\]/gs,
   AGENT_RESULT:    /\[AGENT_RESULT\]([\s\S]*?)\[\/AGENT_RESULT\]/gs,
-  ASK_USER:        /\[ASK_USER\](.*?)\[\/ASK_USER\]/gs,
-};
+   ASK_USER:        /\[ASK_USER\](.*?)\[\/ASK_USER\]/gs,
+   CODE_PROJECT_CREATE: /\[CODE_PROJECT_CREATE\]([\s\S]*?)\[\/CODE_PROJECT_CREATE\]/gs,
+   CODE_PROJECT_LIST:   /\[CODE_PROJECT_LIST\]([\s\S]*?)\[\/CODE_PROJECT_LIST\]/gs,
+   CODE_PROJECT_DELETE: /\[CODE_PROJECT_DELETE\]([\s\S]*?)\[\/CODE_PROJECT_DELETE\]/gs,
+ };
 
 async function processMarkers(text, uid, projectId = null) {
   if (!text || !uid) return { cleanText: text || '' };
@@ -3600,9 +3609,10 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.path && projectId) {
+    if (p && p.path && (p.projectId || projectId)) {
       try {
-        const files = await listFiles(projectId);
+        const effId = p.projectId || projectId;
+        const files = await listFiles(effId);
         const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
         if (entry) {
           cleanText = cleanText.replace(raw, `📄 ${entry[1].name}:\n\`\`\`\n${entry[1].content || ''}\n\`\`\``);
@@ -3610,7 +3620,7 @@ async function processMarkers(text, uid, projectId = null) {
           cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code read error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_READ requires a project context`);
     }
   }}
@@ -3620,16 +3630,17 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.path && p.content !== undefined && projectId) {
+    if (p && p.path && p.content !== undefined && (p.projectId || projectId)) {
       try {
+        const effId = p.projectId || projectId;
         const fid = `code_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
         const ext = p.path.split('.').pop() || '';
         const langMap = { js: 'javascript', ts: 'typescript', py: 'python', html: 'html', css: 'css', json: 'json', md: 'markdown', jsx: 'jsx', tsx: 'tsx' };
         const fileData = { id: fid, name: p.path.split('/').pop(), path: p.path, content: p.content, language: langMap[ext] || ext, size: p.content.length, createdAt: Date.now(), updatedAt: Date.now() };
-        await setFileContent(projectId, fid, fileData);
+        await setFileContent(effId, fid, fileData);
         cleanText = cleanText.replace(raw, `✅ Created file: ${p.path} (${p.content.length} bytes)`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code write error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_WRITE requires a project context`);
     }
   }}
@@ -3639,9 +3650,10 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.path && p.oldString !== undefined && p.newString !== undefined && projectId) {
+    if (p && p.path && p.oldString !== undefined && p.newString !== undefined && (p.projectId || projectId)) {
       try {
-        const files = await listFiles(projectId);
+        const effId = p.projectId || projectId;
+        const files = await listFiles(effId);
         const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
         if (!entry) { cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`); continue; }
         const [fid, f] = entry;
@@ -3652,10 +3664,10 @@ async function processMarkers(text, uid, projectId = null) {
         const newContent = f.content.replace(p.oldString, p.newString);
         f.content = newContent;
         f.updatedAt = Date.now();
-        await setFileContent(projectId, fid, f);
+        await setFileContent(effId, fid, f);
         cleanText = cleanText.replace(raw, `✅ Edited ${p.path} — replaced "${p.oldString.slice(0, 40)}"`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code edit error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_EDIT requires a project context`);
     }
   }}
@@ -3665,18 +3677,19 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.path && projectId) {
+    if (p && p.path && (p.projectId || projectId)) {
       try {
-        const files = await listFiles(projectId);
+        const effId = p.projectId || projectId;
+        const files = await listFiles(effId);
         const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
         if (entry) {
-          await deleteFileContent(projectId, entry[0]);
+          await deleteFileContent(effId, entry[0]);
           cleanText = cleanText.replace(raw, `✅ Deleted file: ${p.path}`);
         } else {
           cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code delete error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_DELETE requires a project context`);
     }
   }}
@@ -3686,9 +3699,10 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.pattern && projectId) {
+    if (p && p.pattern && (p.projectId || projectId)) {
       try {
-        const files = await listFiles(projectId);
+        const effId = p.projectId || projectId;
+        const files = await listFiles(effId);
         const reStr = p.pattern.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*');
         const re = new RegExp('^' + reStr + '$');
         const matches = Object.values(files).filter(f => re.test(f.path)).map(f => f.path);
@@ -3698,7 +3712,7 @@ async function processMarkers(text, uid, projectId = null) {
           cleanText = cleanText.replace(raw, `📂 No files matching "${p.pattern}"`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code glob error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_GLOB requires a project context`);
     }
   }}
@@ -3708,9 +3722,10 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.pattern && projectId) {
+    if (p && p.pattern && (p.projectId || projectId)) {
       try {
-        const files = await listFiles(projectId);
+        const effId = p.projectId || projectId;
+        const files = await listFiles(effId);
         const results = [];
         for (const f of Object.values(files)) {
           if (p.path && !f.path.startsWith(p.path)) continue;
@@ -3728,7 +3743,7 @@ async function processMarkers(text, uid, projectId = null) {
           cleanText = cleanText.replace(raw, `🔍 No matches for "${p.pattern}"`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code grep error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_GREP requires a project context`);
     }
   }}
@@ -3738,7 +3753,8 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.command && projectId) {
+    if (p && p.command && (p.projectId || projectId)) {
+      const effId = p.projectId || projectId;
       const ALLOWED_COMMANDS = /^(npm|node|python|pip|ls|cat|echo|mkdir|touch|rm|cp|mv|grep|find|wc|sort|head|tail|git|npx|tsc|eslint|prettier|jest|mocha|vitest)\b/;
       if (!ALLOWED_COMMANDS.test(p.command.trim())) {
         cleanText = cleanText.replace(raw, `⚠ Command not allowed: ${p.command.split(' ')[0]}`);
@@ -3746,13 +3762,13 @@ async function processMarkers(text, uid, projectId = null) {
       }
       try {
         const { execSync } = require('child_process');
-        const output = execSync(p.command, { cwd: `${PROJECTS_DIR}/${projectId}`, timeout: 30000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 2000);
+        const output = execSync(p.command, { cwd: `${PROJECTS_DIR}/${effId}`, timeout: 30000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 2000);
         cleanText = cleanText.replace(raw, `⚙ Output:\n\`\`\`\n${output || '(no output)'}\n\`\`\``);
       } catch (e) {
         const msg = e.stderr || e.stdout || e.message || '(unknown error)';
         cleanText = cleanText.replace(raw, `⚠ Command error:\n\`\`\`\n${String(msg).slice(0, 2000)}\n\`\`\``);
       }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_EXEC requires a project context`);
     }
   }}
@@ -3762,7 +3778,8 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.command && projectId) {
+    if (p && p.command && (p.projectId || projectId)) {
+      const effId = p.projectId || projectId;
       const ALLOWED = /^(status|diff|log|add|commit|branch|checkout|stash|push|pull|fetch|merge|reset|show|tag|init)\b/;
       const cmdStr = p.command.trim();
       if (!ALLOWED.test(cmdStr) || /--(force|hard|dangerous)/.test(cmdStr)) {
@@ -3772,13 +3789,13 @@ async function processMarkers(text, uid, projectId = null) {
       try {
         const { execSync } = require('child_process');
         const fullCmd = `git ${cmdStr}`;
-        const output = execSync(fullCmd, { cwd: `${PROJECTS_DIR}/${projectId}`, timeout: 15000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 3000);
+        const output = execSync(fullCmd, { cwd: `${PROJECTS_DIR}/${effId}`, timeout: 15000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 3000);
         cleanText = cleanText.replace(raw, `🔧 Git ${cmdStr}:\n\`\`\`\n${output || '(no output)'}\n\`\`\``);
       } catch (e) {
         const msg = e.stderr || e.stdout || e.message || '(unknown error)';
         cleanText = cleanText.replace(raw, `⚠ Git error:\n\`\`\`\n${String(msg).slice(0, 2000)}\n\`\`\``);
       }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CODE_GIT requires a project context`);
     }
   }}
@@ -3788,15 +3805,16 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.task && projectId) {
+    if (p && p.task && (p.projectId || projectId)) {
       try {
+        const effId = p.projectId || projectId;
         const sessionId = `agent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
         const model = p.model || 'openai';
         const type = p.type || 'sub-agent';
-        await spawnSubAgent(uid, projectId, sessionId, p.task, model, type);
-        cleanText = cleanText.replace(raw, `🤖 Spawned agent (ID: ${sessionId}) for task: ${p.task.slice(0, 60)}...\nProgress: /api/projects/${projectId}/agents/${sessionId}`);
+        await spawnSubAgent(uid, effId, sessionId, p.task, model, type);
+        cleanText = cleanText.replace(raw, `🤖 Spawned agent (ID: ${sessionId}) for task: ${p.task.slice(0, 60)}...\nProgress: /api/projects/${effId}/agents/${sessionId}`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Spawn agent error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ SPAWN_AGENT requires a project context`);
     }
   }}
@@ -3806,9 +3824,10 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.sessionId && projectId) {
+    if (p && p.sessionId && (p.projectId || projectId)) {
       try {
-        const snap = await gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}`).once('value');
+        const effId = p.projectId || projectId;
+        const snap = await gmailDb().ref(`projects/${effId}/agents/${p.sessionId}`).once('value');
         const agent = snap.val();
         if (!agent) {
           cleanText = cleanText.replace(raw, `⚠ Agent session not found: ${p.sessionId}`);
@@ -3816,7 +3835,7 @@ async function processMarkers(text, uid, projectId = null) {
           cleanText = cleanText.replace(raw, `🤖 Agent ${p.sessionId}: status=${agent.status}, progress=${agent.progress}%, result=${agent.result ? agent.result.slice(0, 200) : 'pending'}${agent.error ? ', error=' + agent.error : ''}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Check agent error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ CHECK_AGENT requires a project context`);
     }
   }}
@@ -3826,20 +3845,20 @@ async function processMarkers(text, uid, projectId = null) {
     const raw = m[0];
     let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.sessionId && p.message && projectId) {
+    if (p && p.sessionId && p.message && (p.projectId || projectId)) {
       try {
-        const snap = await gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}`).once('value');
+        const effId = p.projectId || projectId;
+        const snap = await gmailDb().ref(`projects/${effId}/agents/${p.sessionId}`).once('value');
         const agent = snap.val();
         if (!agent) {
           cleanText = cleanText.replace(raw, `⚠ Agent session not found: ${p.sessionId}`);
         } else {
-          // Send message to agent's conversation history
-          const convRef = gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}/conversation`);
+          const convRef = gmailDb().ref(`projects/${effId}/agents/${p.sessionId}/conversation`);
           await convRef.push({ role: 'user', content: p.message, timestamp: Date.now() });
           cleanText = cleanText.replace(raw, `💬 Message sent to agent ${p.sessionId}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Talk to agent error: ${e.message}`); }
-    } else if (!projectId) {
+    } else if (!(p && p.projectId) && !projectId) {
       cleanText = cleanText.replace(raw, `⚠ TALK_TO_AGENT requires a project context`);
     }
   }}
@@ -3911,6 +3930,55 @@ async function processMarkers(text, uid, projectId = null) {
           cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} ${count === 1 ? 'section' : 'sections'})`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
+    }
+  }}
+
+  // ── CODE_PROJECT_CREATE ──
+  { let m; while ((m = MARKER_RE.CODE_PROJECT_CREATE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.name) {
+      try {
+        const pid = `proj_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const metadata = { name: p.name.trim(), description: p.description || '', owner: uid, status: 'active', createdAt: Date.now(), updatedAt: Date.now() };
+        await gmailDb().ref(`projects/${pid}/metadata`).set(metadata);
+        await gmailDb().ref(`projects/${pid}/chat/_meta`).set({ createdAt: Date.now() });
+        cleanText = cleanText.replace(raw, `✅ Project created: "${p.name}" (ID: ${pid})`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Project create error: ${e.message}`); }
+    }
+  }}
+
+  // ── CODE_PROJECT_LIST ──
+  { let m; while ((m = MARKER_RE.CODE_PROJECT_LIST.exec(text)) !== null) {
+    const raw = m[0];
+    try {
+      const projects = await listProjects(uid);
+      if (projects.length === 0) {
+        cleanText = cleanText.replace(raw, `📂 No projects found`);
+      } else {
+        const list = projects.map(p => `  • ${p.name} (ID: ${p.id})${p.description ? ' — ' + p.description : ''}`).join('\n');
+        cleanText = cleanText.replace(raw, `📂 Projects:\n${list}`);
+      }
+    } catch (e) { cleanText = cleanText.replace(raw, `⚠ Project list error: ${e.message}`); }
+  }}
+
+  // ── CODE_PROJECT_DELETE ──
+  { let m; while ((m = MARKER_RE.CODE_PROJECT_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.projectId) {
+      try {
+        const snap = await gmailDb().ref(`projects/${p.projectId}/metadata`).once('value');
+        const meta = snap.val();
+        if (!meta || meta.owner !== uid) {
+          cleanText = cleanText.replace(raw, `⚠ Project not found or not owned by you`);
+          continue;
+        }
+        await gmailDb().ref(`projects/${p.projectId}`).remove();
+        cleanText = cleanText.replace(raw, `✅ Project deleted: ${p.projectId}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Project delete error: ${e.message}`); }
     }
   }}
 
@@ -5515,7 +5583,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\n[CODE_PROJECT_CREATE]{"name":"My Project"}[/CODE_PROJECT_CREATE]\n[CODE_PROJECT_LIST]{}[/CODE_PROJECT_LIST]\n[CODE_WRITE]{"path":"file.js","content":"code","projectId":"proj_xxx"}[/CODE_WRITE]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML. To work with projects, first create one with CODE_PROJECT_CREATE, then use CODE_*/SPAWN_AGENT markers with the "projectId" field set to the returned project ID.`;
   const completeHint = (task.type !== 'scheduled' && task.type !== 'continuous') ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
