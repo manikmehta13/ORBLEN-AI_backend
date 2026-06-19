@@ -1296,6 +1296,164 @@ async function getCalendarAccessToken(uid) {
   return refreshed.accessToken;
 }
 
+// ══════════════════════════════════════════════════════════════
+//  👥 GOOGLE PEOPLE (CONTACTS) API
+// ══════════════════════════════════════════════════════════════
+
+const peopleStates = new Map();
+const PEOPLE_REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI || '').replace('/gmail/', '/people/');
+const PEOPLE_API = "https://people.googleapis.com/v1";
+const PEOPLE_FIELDS = "names,emailAddresses,phoneNumbers,addresses,birthdays,organizations,biographies,nicknames,urls";
+
+async function getPeopleTokens(uid) {
+  const snap = await gmailDb().ref(`users/${uid}/people`).once("value");
+  return snap.val() || null;
+}
+async function setPeopleTokens(uid, tokens) {
+  await gmailDb().ref(`users/${uid}/people`).set(tokens);
+}
+async function refreshPeopleTokens(uid, current) {
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: current.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+  const data = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("People token refresh failed: " + (data.error || tokenRes.statusText));
+  const tokens = { accessToken: data.access_token, refreshToken: current.refreshToken, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+  await setPeopleTokens(uid, tokens);
+  return tokens;
+}
+async function getPeopleAccessToken(uid) {
+  const tokens = await getPeopleTokens(uid);
+  if (!tokens || !tokens.refreshToken) throw new Error("Google People not connected");
+  if (tokens.accessToken && tokens.expiresAt > Date.now() + 60_000) return tokens.accessToken;
+  const refreshed = await refreshPeopleTokens(uid, tokens);
+  return refreshed.accessToken;
+}
+
+// ── People Step 1: OAuth URL ──
+app.get("/api/people/auth-url", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const state = crypto.randomBytes(32).toString("hex");
+    peopleStates.set(state, { uid, expiresAt: Date.now() + 600_000 });
+    const scopes = "https://www.googleapis.com/auth/contacts";
+    res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(PEOPLE_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${state}&access_type=offline&prompt=consent` });
+  } catch (err) { res.status(401).json({ error: err.message }); }
+});
+
+// ── People Step 2: OAuth callback ──
+app.get("/api/people/oauth/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send("Missing code or state");
+  const stored = peopleStates.get(state);
+  if (!stored) return res.status(400).send("Invalid state");
+  peopleStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: PEOPLE_REDIRECT_URI, grant_type: "authorization_code" })
+    });
+    const data = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(data.error || "Token exchange failed");
+    const tokens = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    await setPeopleTokens(stored.uid, tokens);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:8888"}?people=connected`);
+  } catch (err) { res.status(500).send("People OAuth failed: " + err.message); }
+});
+
+// ── People Step 3: Check status ──
+app.get("/api/people/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const tokens = await getPeopleTokens(uid);
+    res.json({ connected: !!(tokens && tokens.accessToken), expiresAt: tokens?.expiresAt || 0 });
+  } catch { res.json({ connected: false, expiresAt: 0 }); }
+});
+
+// ── People Step 4: List/Search contacts ──
+app.post("/api/people/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { query, maxResults } = req.body;
+    if (!query) return res.status(400).json({ error: "query required" });
+    const token = await getPeopleAccessToken(uid);
+    const params = new URLSearchParams({ query, pageSize: String(Math.min(maxResults || 10, 50)), readMask: PEOPLE_FIELDS });
+    const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await searchRes.json();
+    if (!searchRes.ok) throw new Error(data.error?.message || `People API error (${searchRes.status})`);
+    res.json({ contacts: (data.results || []).map(r => r.person).filter(Boolean) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── People Step 5: Get single contact ──
+app.post("/api/people/get", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { resourceName } = req.body;
+    if (!resourceName) return res.status(400).json({ error: "resourceName required" });
+    const token = await getPeopleAccessToken(uid);
+    const params = new URLSearchParams({ personFields: PEOPLE_FIELDS });
+    const getRes = await fetch(`${PEOPLE_API}/${encodeURIComponent(resourceName)}?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await getRes.json();
+    if (!getRes.ok) throw new Error(data.error?.message || `People API error (${getRes.status})`);
+    res.json({ contact: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── People Step 6: Create contact ──
+app.post("/api/people/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const body = req.body;
+    if (!body || (!body.names && !body.emailAddresses && !body.phoneNumbers)) return res.status(400).json({ error: "At least one of names, emailAddresses, or phoneNumbers required" });
+    const token = await getPeopleAccessToken(uid);
+    const createRes = await fetch(`${PEOPLE_API}/people:createContact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await createRes.json();
+    if (!createRes.ok) throw new Error(data.error?.message || `People API error (${createRes.status})`);
+    const name = data.names?.[0]?.displayName || data.resourceName || "Contact";
+    res.json({ contact: data, created: true, summary: `${name} created` });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── People Step 7: Update contact ──
+app.post("/api/people/update", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { resourceName, ...fields } = req.body;
+    if (!resourceName) return res.status(400).json({ error: "resourceName required" });
+    const allowedFields = ["names","emailAddresses","phoneNumbers","addresses","birthdays","organizations","biographies","nicknames","urls"];
+    const updateFields = Object.keys(fields).filter(k => allowedFields.includes(k)).join(",");
+    if (!updateFields) return res.status(400).json({ error: "No valid fields to update" });
+    const token = await getPeopleAccessToken(uid);
+    const params = new URLSearchParams({ updatePersonFields: updateFields });
+    const updateRes = await fetch(`${PEOPLE_API}/${encodeURIComponent(resourceName)}:updateContact?${params}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(fields)
+    });
+    const data = await updateRes.json();
+    if (!updateRes.ok) throw new Error(data.error?.message || `People API error (${updateRes.status})`);
+    const name = data.names?.[0]?.displayName || data.resourceName || "Contact";
+    res.json({ contact: data, updated: true, summary: `${name} updated` });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 const CAL_API = "https://www.googleapis.com/calendar/v3";
 
 // ── Calendar Step 1: OAuth URL ──
@@ -2121,6 +2279,10 @@ const MARKER_RE = {
   CALENDAR_UPDATE: /\[CALENDAR_UPDATE\](.*?)\[\/CALENDAR_UPDATE\]/gs,
   CALENDAR_DELETE: /\[CALENDAR_DELETE\](.*?)\[\/CALENDAR_DELETE\]/gs,
   SAVE_MEMORY:     /\[SAVE_MEMORY\](.*?)\[\/SAVE_MEMORY\]/gs,
+  PEOPLE_LIST:     /\[PEOPLE_LIST\](.*?)\[\/PEOPLE_LIST\]/gs,
+  PEOPLE_GET:      /\[PEOPLE_GET\](.*?)\[\/PEOPLE_GET\]/gs,
+  PEOPLE_CREATE:   /\[PEOPLE_CREATE\](.*?)\[\/PEOPLE_CREATE\]/gs,
+  PEOPLE_UPDATE:   /\[PEOPLE_UPDATE\](.*?)\[\/PEOPLE_UPDATE\]/gs,
 };
 
 async function processMarkers(text, uid) {
@@ -2915,6 +3077,108 @@ async function processMarkers(text, uid) {
         if (delRes.ok) cleanText = cleanText.replace(raw, `🗑 Event deleted (ID: ${evId})`);
         else { const e = await delRes.json().catch(() => ({})); cleanText = cleanText.replace(raw, `⚠ Calendar delete failed: ${e.error?.message || delRes.statusText}`); }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ Calendar delete error: ${e.message}`); }
+    }
+  }}
+
+  // ── PEOPLE_LIST ──
+  { let m; while ((m = MARKER_RE.PEOPLE_LIST.exec(text)) !== null) {
+    const raw = m[0]; let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.query) {
+      try {
+        const token = await getPeopleAccessToken(uid);
+        const params = new URLSearchParams({ query: p.query, pageSize: String(Math.min(p.maxResults || 10, 50)), readMask: PEOPLE_FIELDS });
+        const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+        const data = await searchRes.json();
+        if (!searchRes.ok) throw new Error(data.error?.message || searchRes.statusText);
+        const persons = (data.results || []).map(r => r.person).filter(Boolean);
+        if (!persons.length) {
+          cleanText = cleanText.replace(raw, `📇 No contacts matching "${p.query}".`);
+        } else {
+          const lines = persons.map((c, i) => {
+            const name = c.names?.[0]?.displayName || 'Unknown';
+            const email = c.emailAddresses?.map(e => e.value).join(', ') || '';
+            const phone = c.phoneNumbers?.map(n => n.value).join(', ') || '';
+            const org = c.organizations?.map(o => o.name).filter(Boolean).join(', ') || '';
+            const extra = [email, phone, org].filter(Boolean).join(' — ');
+            return `${i + 1}. ${name}${extra ? ' (' + extra + ')' : ''} (resourceName: ${c.resourceName})`;
+          });
+          cleanText = cleanText.replace(raw, `📇 Contacts matching "${p.query}":\n${lines.join('\n')}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ People list error: ${e.message}`); }
+    }
+  }}
+
+  // ── PEOPLE_GET ──
+  { let m; while ((m = MARKER_RE.PEOPLE_GET.exec(text)) !== null) {
+    const raw = m[0]; let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.resourceName) {
+      try {
+        const token = await getPeopleAccessToken(uid);
+        const params = new URLSearchParams({ personFields: PEOPLE_FIELDS });
+        const getRes = await fetch(`${PEOPLE_API}/${encodeURIComponent(p.resourceName)}?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+        const data = await getRes.json();
+        if (!getRes.ok) throw new Error(data.error?.message || getRes.statusText);
+        const c = data;
+        const lines = [];
+        if (c.names?.[0]) lines.push(`Name: ${c.names.map(n => n.displayName).join(', ')}`);
+        if (c.emailAddresses?.length) lines.push(`Email: ${c.emailAddresses.map(e => e.value).join(', ')}`);
+        if (c.phoneNumbers?.length) lines.push(`Phone: ${c.phoneNumbers.map(n => `${n.value}${n.type ? ' (' + n.type + ')' : ''}`).join(', ')}`);
+        if (c.addresses?.length) lines.push(`Address: ${c.addresses.map(a => a.formattedValue).join(', ')}`);
+        if (c.birthdays?.length) {
+          const b = c.birthdays[0].date;
+          lines.push(`Birthday: ${b.month}/${b.day}${b.year ? '/' + b.year : ''}`);
+        }
+        if (c.organizations?.length) lines.push(`Organization: ${c.organizations.map(o => [o.name, o.title].filter(Boolean).join(' - ')).join(', ')}`);
+        if (c.biographies?.length) lines.push(`Bio: ${c.biographies[0].value}`);
+        if (c.nicknames?.length) lines.push(`Nickname: ${c.nicknames.map(n => n.value).join(', ')}`);
+        if (c.urls?.length) lines.push(`URLs: ${c.urls.map(u => u.value).join(', ')}`);
+        cleanText = cleanText.replace(raw, `📇 Contact: ${c.resourceName}\n${lines.join('\n')}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ People get error: ${e.message}`); }
+    }
+  }}
+
+  // ── PEOPLE_CREATE ──
+  { let m; while ((m = MARKER_RE.PEOPLE_CREATE.exec(text)) !== null) {
+    const raw = m[0]; let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && (p.names || p.emailAddresses || p.phoneNumbers)) {
+      try {
+        const token = await getPeopleAccessToken(uid);
+        const createRes = await fetch(`${PEOPLE_API}/people:createContact`, {
+          method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(p)
+        });
+        const data = await createRes.json();
+        if (!createRes.ok) throw new Error(data.error?.message || createRes.statusText);
+        const name = data.names?.[0]?.displayName || data.resourceName || 'Contact';
+        cleanText = cleanText.replace(raw, `✅ Contact created: ${name} (${data.resourceName})`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ People create error: ${e.message}`); }
+    }
+  }}
+
+  // ── PEOPLE_UPDATE ──
+  { let m; while ((m = MARKER_RE.PEOPLE_UPDATE.exec(text)) !== null) {
+    const raw = m[0]; let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.resourceName) {
+      try {
+        const allowedFields = ["names","emailAddresses","phoneNumbers","addresses","birthdays","organizations","biographies","nicknames","urls"];
+        const updateFields = Object.keys(p).filter(k => allowedFields.includes(k) && k !== 'resourceName').join(",");
+        if (!updateFields) { cleanText = cleanText.replace(raw, '⚠ No valid fields to update'); continue; }
+        const token = await getPeopleAccessToken(uid);
+        const params = new URLSearchParams({ updatePersonFields: updateFields });
+        const { resourceName, ...fields } = p;
+        const updateRes = await fetch(`${PEOPLE_API}/${encodeURIComponent(resourceName)}:updateContact?${params}`, {
+          method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(fields)
+        });
+        const data = await updateRes.json();
+        if (!updateRes.ok) throw new Error(data.error?.message || updateRes.statusText);
+        const name = data.names?.[0]?.displayName || data.resourceName || 'Contact';
+        cleanText = cleanText.replace(raw, `✅ Contact updated: ${name} (${data.resourceName})`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ People update error: ${e.message}`); }
     }
   }}
 
@@ -4573,7 +4837,7 @@ async function executeSingleTask(uid, taskId, task) {
   const now = Date.now();
   const history = task.conversationHistory || [];
   const contextStr = Object.keys(task.context || {}).length ? `\n\nCurrent context: ${JSON.stringify(task.context)}` : '';
-  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
+  const markerExamples = `\n\nMarker format examples:\n[GMAIL_SEND]{"to":"user@email.com","subject":"Hello","body":"Message with **bold** and *italic*"}[/GMAIL_SEND]\n[CALENDAR_DELETE]{"id":"event-id"}[/CALENDAR_DELETE]\n[DOCS_CREATE]{"title":"Doc","body":"Content"}[/DOCS_CREATE]\n[SAVE_MEMORY]{"personal_information":{"preferred_name":"Manik","full_name":"Manik Mehta","location":{"city":"Fatehabad","state":"Haryana","country":"India"}}}[/SAVE_MEMORY]\n[PEOPLE_LIST]{"query":"John","maxResults":5}[/PEOPLE_LIST]\nUse valid JSON inside markers. Email body supports markdown — it will be converted to HTML.`;
   const completeHint = (task.type !== 'scheduled' && task.type !== 'continuous') ? '\n\nIf this task is permanently done, end with [TASK_COMPLETE] so it is not re-run.' : '';
 
   // Auto web search if prompt suggests current info is needed
@@ -4727,7 +4991,7 @@ app.listen(PORT, () => {
     process.env.GROQ_API_KEY       ? "✅ Groq + 🧠 Memory" : "❌ Groq / Memory",
     process.env.COHERE_API_KEY     ? "✅ Cohere"       : "❌ Cohere",
     process.env.TAVILY_API_KEY     ? "✅ Tavily Search" : "⚠️  Tavily (DDG fallback active)",
-    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides + Sheets + Calendar" : "❌ Gmail / Docs / Slides / Sheets / Calendar",
+    process.env.GOOGLE_CLIENT_ID   ? "✅ Gmail + Docs + Slides + Sheets + Calendar + People" : "❌ Gmail / Docs / Slides / Sheets / Calendar / People",
     firebaseReady                  ? "✅ Firebase RTDB" : "❌ Firebase RTDB",
   ].join(" | ")}`);
 });
