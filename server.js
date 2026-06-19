@@ -1622,6 +1622,11 @@ async function executeSubAgent(uid, projectId, sessionId, task, model) {
 // ── Agent group supervision ──
 async function checkAgentGroupCompletion(uid, projectId, agentGroup) {
   try {
+    // Prevent re-triggering if already reviewed or in progress
+    const existingGroupSnap = await gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`).once('value');
+    const existing = existingGroupSnap.val();
+    if (existing && (existing.finalized || existing.reviewedAt || existing.reviewing)) return;
+
     const agentsSnap = await gmailDb().ref(`projects/${projectId}/agents`).once('value');
     const agents = agentsSnap.val() || {};
     const groupAgents = Object.entries(agents)
@@ -1642,16 +1647,15 @@ async function checkAgentGroupCompletion(uid, projectId, agentGroup) {
     );
     const summary = `Agent group "${agentGroup}" completed.\n${done}/${total} succeeded, ${failed}/${total} failed.\n\nResults:\n${summaryParts.join('\n\n---\n\n')}`;
 
-    // Find the main task that spawned this group
-    // The main LLM conversation is at the project chat or an automation task
-    // Store supervision summary at group path for retrieval
+    // Mark group as reviewing (prevents re-trigger)
     const groupRef = gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`);
     await groupRef.set({
       agentGroup,
       status: 'completed',
       summary,
       total, done, failed,
-      completedAt: Date.now()
+      completedAt: Date.now(),
+      reviewing: true
     });
 
     // Trigger background main LLM review
@@ -1760,13 +1764,20 @@ Available markers:
       isComplete: !!completeMatch
     });
 
-    // If completed, mark the group as finalized
+    // Update group: always clear reviewing, mark finalized only if complete
+    const groupRef = gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`);
+    const updateData = { reviewing: false, reviewedAt: Date.now() };
     if (completeMatch) {
-      const groupRef = gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`);
-      await groupRef.update({ finalized: true, finalizedAt: Date.now() });
+      updateData.finalized = true;
+      updateData.finalizedAt = Date.now();
     }
+    await groupRef.update(updateData);
   } catch (e) {
     console.error('⚠ Agent group review error:', e.message);
+    // Clear reviewing flag so the group isn't stuck
+    try {
+      await gmailDb().ref(`projects/${projectId}/_agentGroups/${agentGroup}`).update({ reviewing: false, reviewError: e.message });
+    } catch {}
   }
 }
 
@@ -2966,10 +2977,9 @@ function autoWrapBareMarkers(text) {
           // Check if already has projectId (which means it might be used from non-project context)
           const wrapped = wrapBareJson(parsed, markerTypes);
           if (wrapped) {
-            // Keep the original JSON but replace with wrapped version
-            // Only if it's NOT inside a code block
-            const prefixLines = text.slice(Math.max(0, i - 500), i);
-            const inCodeBlock = (prefixLines.match(/```/g) || []).length % 2 === 1;
+            // Only wrap if NOT inside a code block — scan from beginning for paired ```
+            const codeBlockMatches = text.slice(0, i).match(/```/g);
+            const inCodeBlock = (codeBlockMatches || []).length % 2 === 1;
             if (!inCodeBlock) {
               result.push(wrapped);
               i = j;
