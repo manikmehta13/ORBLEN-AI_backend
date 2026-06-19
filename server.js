@@ -1459,6 +1459,366 @@ app.post("/api/people/update", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  📁 PROJECTS SYSTEM — multi-agent coding platform
+// ══════════════════════════════════════════════════════════════
+
+const PROJECTS_DIR = '/tmp/orblen_projects';
+if (!require('fs').existsSync(PROJECTS_DIR)) require('fs').mkdirSync(PROJECTS_DIR, { recursive: true });
+
+async function getProject(uid, pid) {
+  const snap = await gmailDb().ref(`projects/${pid}`).once('value');
+  const p = snap.val();
+  if (!p || p.owner !== uid) return null;
+  return { id: pid, ...p };
+}
+async function setProject(pid, data) {
+  await gmailDb().ref(`projects/${pid}/metadata`).update(data);
+}
+async function deleteProjectData(pid) {
+  await gmailDb().ref(`projects/${pid}`).remove();
+  const dir = `${PROJECTS_DIR}/${pid}`;
+  if (require('fs').existsSync(dir)) require('fs').rmSync(dir, { recursive: true, force: true });
+}
+async function listProjects(uid) {
+  const snap = await gmailDb().ref('projects').orderByChild('metadata/owner').equalTo(uid).once('value');
+  const vals = snap.val() || {};
+  return Object.entries(vals).map(([id, p]) => ({ id, ...(p.metadata || {}) })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+async function getFileContent(pid, fid) {
+  const snap = await gmailDb().ref(`projects/${pid}/files/${fid}`).once('value');
+  return snap.val() || null;
+}
+async function setFileContent(pid, fid, data) {
+  await gmailDb().ref(`projects/${pid}/files/${fid}`).set(data);
+}
+async function deleteFileContent(pid, fid) {
+  await gmailDb().ref(`projects/${pid}/files/${fid}`).remove();
+}
+async function listFiles(pid) {
+  const snap = await gmailDb().ref(`projects/${pid}/files`).once('value');
+  return snap.val() || {};
+}
+async function addProjectChat(pid, msg) {
+  const ref = gmailDb().ref(`projects/${pid}/chat`).push();
+  await ref.set({ ...msg, id: ref.key, timestamp: Date.now() });
+  return ref.key;
+}
+async function getProjectChat(pid, limit = 50, offset = 0) {
+  const snap = await gmailDb().ref(`projects/${pid}/chat`).orderByChild('timestamp').limitToLast(limit + offset).once('value');
+  const vals = snap.val() || {};
+  let msgs = Object.values(vals).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  if (offset > 0) msgs = msgs.slice(0, msgs.length - offset);
+  return msgs.slice(-limit);
+}
+async function getProjectProgress(pid) {
+  const agentsSnap = await gmailDb().ref(`projects/${pid}/agents`).once('value');
+  const agents = agentsSnap.val() || {};
+  const agentList = Object.values(agents).map(a => ({
+    id: a.id, type: a.type, task: a.task, status: a.status || 'queued',
+    progress: a.progress || 0, error: a.error || null, model: a.model || 'unknown'
+  }));
+  const total = agentList.length;
+  const done = agentList.filter(a => a.status === 'completed').length;
+  const failed = agentList.filter(a => a.status === 'failed' || a.status === 'error').length;
+  const pendingSnap = await gmailDb().ref(`projects/${pid}/_pendingQuestion`).once('value');
+  const pendingQuestion = pendingSnap.val();
+  return { agents: agentList, total, done, failed, pendingQuestion, percent: total ? Math.round((done + failed) / total * 100) : 0 };
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🤖 AGENT RATINGS — global, cross-user, auto-updated
+// ══════════════════════════════════════════════════════════════
+
+async function getAgentRating(type) {
+  const snap = await gmailDb().ref(`agent_ratings/${type}`).once('value');
+  return snap.val() || { type, totalTasks: 0, successCount: 0, errorCount: 0, avgRating: 0, lastUpdated: 0 };
+}
+async function updateAgentRating(type, success) {
+  const ref = gmailDb().ref(`agent_ratings/${type}`);
+  const snap = await ref.once('value');
+  const current = snap.val() || { type, totalTasks: 0, successCount: 0, errorCount: 0, avgRating: 0, lastUpdated: 0 };
+  current.totalTasks++;
+  if (success) current.successCount++;
+  else current.errorCount++;
+  current.avgRating = Math.max((current.successCount / current.totalTasks) * 5 - Math.min(current.errorCount * 0.1, 2.0), 0);
+  current.lastUpdated = Date.now();
+  await ref.set(current);
+  return current;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  👾 MULTI-AGENT EXECUTION — spawned background agents
+// ══════════════════════════════════════════════════════════════
+
+async function spawnSubAgent(uid, projectId, sessionId, task, model, type) {
+  const ref = gmailDb().ref(`projects/${projectId}/agents/${sessionId}`);
+  const agentData = { id: sessionId, type: type || model || 'openai', task, status: 'queued', progress: 0, result: null, error: null, model: model || 'openai', createdAt: Date.now(), updatedAt: Date.now() };
+  await ref.set(agentData);
+
+  // Execute asynchronously
+  executeSubAgent(uid, projectId, sessionId, task, model).catch(async err => {
+    await ref.update({ status: 'failed', error: err.message, updatedAt: Date.now() });
+  });
+}
+
+async function executeSubAgent(uid, projectId, sessionId, task, model) {
+  const ref = gmailDb().ref(`projects/${projectId}/agents/${sessionId}`);
+  let agentType = model || 'openai';
+
+  try {
+    await ref.update({ status: 'running', progress: 20, updatedAt: Date.now() });
+
+    const systemMsg = { role: 'system', content: 'You are a sub-agent working on a specific task within a larger project. Be concise and focused. Return your result using [AGENT_RESULT] marker when done.' };
+    const messages = [systemMsg, { role: 'user', content: task }];
+
+    await ref.update({ progress: 40, updatedAt: Date.now() });
+
+    let response = '';
+    try {
+      response = await callModelBackend(agentType, messages);
+    } catch {
+      response = await callModelBackend('openai', messages);
+    }
+
+    await ref.update({ progress: 70, updatedAt: Date.now() });
+
+    // Process result marker
+    const resultMatch = response.match(/\[AGENT_RESULT\]([\s\S]*?)\[\/AGENT_RESULT\]/);
+    const result = resultMatch ? resultMatch[1].trim() : response.trim();
+
+    await ref.update({
+      status: 'completed',
+      progress: 100,
+      result,
+      rawResponse: response,
+      updatedAt: Date.now()
+    });
+
+    // Update agent ratings
+    await updateAgentRating(agentType, true);
+  } catch (err) {
+    await ref.update({ status: 'failed', error: err.message, progress: 0, updatedAt: Date.now() });
+    await updateAgentRating(agentType, false);
+  }
+}
+
+// ── Create project ──
+app.post("/api/projects/create", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { name, description } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: "name required" });
+    const pid = `proj_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const metadata = { name: name.trim(), description: description || '', owner: uid, status: 'active', createdAt: Date.now(), updatedAt: Date.now() };
+    await gmailDb().ref(`projects/${pid}/metadata`).set(metadata);
+    await gmailDb().ref(`projects/${pid}/chat/_meta`).set({ createdAt: Date.now() });
+    res.json({ success: true, project: { id: pid, ...metadata } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── List projects ──
+app.get("/api/projects/list", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const projects = await listProjects(uid);
+    res.json({ projects });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Delete project ──
+app.post("/api/projects/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { projectId } = req.body;
+    const p = await getProject(uid, projectId);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    await deleteProjectData(projectId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Rename project ──
+app.post("/api/projects/rename", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { projectId, name } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: "name required" });
+    const p = await getProject(uid, projectId);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    await setProject(projectId, { name: name.trim(), updatedAt: Date.now() });
+    res.json({ success: true, name: name.trim() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Get project status (progress + agents) ──
+app.get("/api/projects/:id/status", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const progress = await getProjectProgress(req.params.id);
+    res.json({ project: p, progress });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Get project chat history ──
+app.get("/api/projects/:id/chat", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offset = parseInt(req.query.offset) || 0;
+    const messages = await getProjectChat(req.params.id, limit, offset);
+    res.json({ messages, hasMore: messages.length >= limit });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── List project files ──
+app.get("/api/projects/:id/files", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const files = await listFiles(req.params.id);
+    const fileList = Object.entries(files).map(([fid, f]) => ({ id: fid, name: f.name, path: f.path, language: f.language, size: f.size, createdAt: f.createdAt, updatedAt: f.updatedAt }));
+    res.json({ files: fileList });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Get single file ──
+app.get("/api/projects/:id/files/:fid", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const file = await getFileContent(req.params.id, req.params.fid);
+    if (!file) return res.status(404).json({ error: "File not found" });
+    res.json({ file });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Upload file ──
+app.post("/api/projects/:id/files/upload", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const { name, content, path } = req.body;
+    if (!name) return res.status(400).json({ error: "name required" });
+    const fid = `file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const ext = name.split('.').pop() || '';
+    const langMap = { js: 'javascript', ts: 'typescript', py: 'python', html: 'html', css: 'css', json: 'json', md: 'markdown', jsx: 'jsx', tsx: 'tsx' };
+    const fileData = { id: fid, name, path: path || name, content: content || '', language: langMap[ext] || ext, size: (content || '').length, createdAt: Date.now(), updatedAt: Date.now() };
+    await setFileContent(req.params.id, fid, fileData);
+    res.json({ success: true, file: fileData });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Delete file ──
+app.post("/api/projects/:id/files/delete", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const { fileId } = req.body;
+    await deleteFileContent(req.params.id, fileId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Answer pending question (ASK_USER response) ──
+app.post("/api/projects/:id/answer", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const { answer } = req.body;
+    const pendingSnap = await gmailDb().ref(`projects/${req.params.id}/_pendingQuestion`).once('value');
+    const pending = pendingSnap.val();
+    if (!pending) return res.status(400).json({ error: "No pending question" });
+    await addProjectChat(req.params.id, { role: 'user', content: answer, type: 'answer' });
+    await gmailDb().ref(`projects/${req.params.id}/_pendingQuestion`).remove();
+    await gmailDb().ref(`projects/${req.params.id}/_pendingAnswer`).set({ answer, answeredAt: Date.now() });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Get agent session result ──
+app.get("/api/projects/:id/agents/:sessionId", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const p = await getProject(uid, req.params.id);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+    const snap = await gmailDb().ref(`projects/${req.params.id}/agents/${req.params.sessionId}`).once('value');
+    const agent = snap.val();
+    if (!agent) return res.status(404).json({ error: "Agent session not found" });
+    res.json({ agent });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Project chat (send message, get AI response) ──
+app.post("/api/projects/project-chat", async (req, res) => {
+  try {
+    const uid = await getUserUid(req.headers.authorization);
+    const { projectId, message } = req.body;
+    if (!projectId || !message) return res.status(400).json({ error: "projectId and message required" });
+    const p = await getProject(uid, projectId);
+    if (!p) return res.status(404).json({ error: "Project not found" });
+
+    await addProjectChat(projectId, { role: "user", content: message, type: "message" });
+
+    const chatHistory = await getProjectChat(projectId, 20);
+    const conversationMessages = chatHistory.map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.content }));
+
+    // Get agent type from user's current agent (default to openai)
+    let agentType = "openai";
+    try {
+      const userSnap = await gmailDb().ref(`users/${uid}/prefs/agent`).once('value');
+      if (userSnap.val()) agentType = userSnap.val();
+    } catch {}
+
+    // Build system prompt with file context and agent ratings
+    const files = await listFiles(projectId);
+    const fileList = Object.values(files).map(f => `${f.path || f.name} (${f.language || 'unknown'}, ${f.size || 0} bytes)`).join('\n');
+    const ratings = await getAgentRating(agentType);
+    const ratingStr = `Agent "${agentType}": ${ratings.totalTasks > 0 ? `rating=${ratings.avgRating.toFixed(2)}/5, tasks=${ratings.totalTasks}, success=${ratings.successCount}, errors=${ratings.errorCount}` : 'no rating data yet'}`;
+
+    const systemMsg = {
+      role: "system",
+      content: `You are a coding assistant working on the project "${p.name}". You can use CODE markers to perform file operations (CODE_READ/WRITE/EDIT/DELETE/GLOB/GREP/EXEC/GIT). Use SPAWN_AGENT to delegate complex sub-tasks to sub-agents. Use ASK_USER to ask the user questions when you need decisions.
+
+Keep responses concise and focused.
+
+Project: ${p.name}
+Description: ${p.description || 'N/A'}
+${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet.'}
+
+${ratingStr}
+
+Available agents: SPAWN_AGENT (spawn sub-agent with {"task":"...","model":"openai"}), CHECK_AGENT (check status with {"sessionId":"..."}), ASK_USER (ask user with question text), CODE markers for file operations.`
+    };
+    const allMessages = [systemMsg, ...conversationMessages];
+
+    let aiResponse = "";
+    try {
+      aiResponse = await callModelBackend(agentType, allMessages);
+    } catch {
+      // Fallback
+      aiResponse = await callModelBackend("openai", allMessages);
+    }
+
+    // Process markers
+    const processed = await processMarkers(aiResponse, uid, projectId);
+    await addProjectChat(projectId, { role: "assistant", content: processed.cleanText, type: "message" });
+
+    res.json({ assistantMessage: processed.cleanText, rawResponse: aiResponse });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const CAL_API = "https://www.googleapis.com/calendar/v3";
 
 // ── Calendar Step 1: OAuth URL ──
@@ -2288,9 +2648,22 @@ const MARKER_RE = {
   PEOPLE_GET:      /\[PEOPLE_GET\](.*?)\[\/PEOPLE_GET\]/gs,
   PEOPLE_CREATE:   /\[PEOPLE_CREATE\](.*?)\[\/PEOPLE_CREATE\]/gs,
   PEOPLE_UPDATE:   /\[PEOPLE_UPDATE\](.*?)\[\/PEOPLE_UPDATE\]/gs,
+  CODE_READ:       /\[CODE_READ\](.*?)\[\/CODE_READ\]/gs,
+  CODE_WRITE:      /\[CODE_WRITE\](.*?)\[\/CODE_WRITE\]/gs,
+  CODE_EDIT:       /\[CODE_EDIT\](.*?)\[\/CODE_EDIT\]/gs,
+  CODE_DELETE:     /\[CODE_DELETE\](.*?)\[\/CODE_DELETE\]/gs,
+  CODE_GLOB:       /\[CODE_GLOB\](.*?)\[\/CODE_GLOB\]/gs,
+  CODE_GREP:       /\[CODE_GREP\](.*?)\[\/CODE_GREP\]/gs,
+  CODE_EXEC:       /\[CODE_EXEC\](.*?)\[\/CODE_EXEC\]/gs,
+  CODE_GIT:        /\[CODE_GIT\](.*?)\[\/CODE_GIT\]/gs,
+  SPAWN_AGENT:     /\[SPAWN_AGENT\](.*?)\[\/SPAWN_AGENT\]/gs,
+  CHECK_AGENT:     /\[CHECK_AGENT\](.*?)\[\/CHECK_AGENT\]/gs,
+  TALK_TO_AGENT:   /\[TALK_TO_AGENT\](.*?)\[\/TALK_TO_AGENT\]/gs,
+  AGENT_RESULT:    /\[AGENT_RESULT\]([\s\S]*?)\[\/AGENT_RESULT\]/gs,
+  ASK_USER:        /\[ASK_USER\](.*?)\[\/ASK_USER\]/gs,
 };
 
-async function processMarkers(text, uid) {
+async function processMarkers(text, uid, projectId = null) {
   if (!text || !uid) return { cleanText: text || '' };
   let cleanText = text;
 
@@ -3205,6 +3578,270 @@ async function processMarkers(text, uid) {
         const name = data.names?.[0]?.displayName || data.resourceName || 'Contact';
         cleanText = cleanText.replace(raw, `✅ Contact updated: ${name} (${data.resourceName})`);
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People update error: ${e.message}`); }
+    }
+  }}
+
+  // ── CODE_READ ──
+  { let m; while ((m = MARKER_RE.CODE_READ.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.path && projectId) {
+      try {
+        const files = await listFiles(projectId);
+        const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
+        if (entry) {
+          cleanText = cleanText.replace(raw, `📄 ${entry[1].name}:\n\`\`\`\n${entry[1].content || ''}\n\`\`\``);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code read error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_READ requires a project context`);
+    }
+  }}
+
+  // ── CODE_WRITE ──
+  { let m; while ((m = MARKER_RE.CODE_WRITE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.path && p.content !== undefined && projectId) {
+      try {
+        const fid = `code_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const ext = p.path.split('.').pop() || '';
+        const langMap = { js: 'javascript', ts: 'typescript', py: 'python', html: 'html', css: 'css', json: 'json', md: 'markdown', jsx: 'jsx', tsx: 'tsx' };
+        const fileData = { id: fid, name: p.path.split('/').pop(), path: p.path, content: p.content, language: langMap[ext] || ext, size: p.content.length, createdAt: Date.now(), updatedAt: Date.now() };
+        await setFileContent(projectId, fid, fileData);
+        cleanText = cleanText.replace(raw, `✅ Created file: ${p.path} (${p.content.length} bytes)`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code write error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_WRITE requires a project context`);
+    }
+  }}
+
+  // ── CODE_EDIT ──
+  { let m; while ((m = MARKER_RE.CODE_EDIT.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.path && p.oldString !== undefined && p.newString !== undefined && projectId) {
+      try {
+        const files = await listFiles(projectId);
+        const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
+        if (!entry) { cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`); continue; }
+        const [fid, f] = entry;
+        if (!f.content || !f.content.includes(p.oldString)) {
+          cleanText = cleanText.replace(raw, `⚠ Could not find matching text in ${p.path}`);
+          continue;
+        }
+        const newContent = f.content.replace(p.oldString, p.newString);
+        f.content = newContent;
+        f.updatedAt = Date.now();
+        await setFileContent(projectId, fid, f);
+        cleanText = cleanText.replace(raw, `✅ Edited ${p.path} — replaced "${p.oldString.slice(0, 40)}"`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code edit error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_EDIT requires a project context`);
+    }
+  }}
+
+  // ── CODE_DELETE ──
+  { let m; while ((m = MARKER_RE.CODE_DELETE.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.path && projectId) {
+      try {
+        const files = await listFiles(projectId);
+        const entry = Object.entries(files).find(([, f]) => f.path === p.path || f.name === p.path);
+        if (entry) {
+          await deleteFileContent(projectId, entry[0]);
+          cleanText = cleanText.replace(raw, `✅ Deleted file: ${p.path}`);
+        } else {
+          cleanText = cleanText.replace(raw, `⚠ File not found: ${p.path}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code delete error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_DELETE requires a project context`);
+    }
+  }}
+
+  // ── CODE_GLOB ──
+  { let m; while ((m = MARKER_RE.CODE_GLOB.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.pattern && projectId) {
+      try {
+        const files = await listFiles(projectId);
+        const reStr = p.pattern.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*');
+        const re = new RegExp('^' + reStr + '$');
+        const matches = Object.values(files).filter(f => re.test(f.path)).map(f => f.path);
+        if (matches.length) {
+          cleanText = cleanText.replace(raw, `📂 Files matching "${p.pattern}":\n${matches.join('\n')}`);
+        } else {
+          cleanText = cleanText.replace(raw, `📂 No files matching "${p.pattern}"`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code glob error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_GLOB requires a project context`);
+    }
+  }}
+
+  // ── CODE_GREP ──
+  { let m; while ((m = MARKER_RE.CODE_GREP.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.pattern && projectId) {
+      try {
+        const files = await listFiles(projectId);
+        const results = [];
+        for (const f of Object.values(files)) {
+          if (p.path && !f.path.startsWith(p.path)) continue;
+          if (!f.content) continue;
+          let idx = 0, line = 1;
+          const lines = f.content.split('\n');
+          for (const l of lines) {
+            if (l.includes(p.pattern)) results.push(`${f.path}:${line}: ${l.trim().slice(0, 120)}`);
+            line++;
+          }
+        }
+        if (results.length) {
+          cleanText = cleanText.replace(raw, `🔍 Grep results for "${p.pattern}":\n${results.slice(0, 50).join('\n')}`);
+        } else {
+          cleanText = cleanText.replace(raw, `🔍 No matches for "${p.pattern}"`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Code grep error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_GREP requires a project context`);
+    }
+  }}
+
+  // ── CODE_EXEC ──
+  { let m; while ((m = MARKER_RE.CODE_EXEC.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.command && projectId) {
+      const ALLOWED_COMMANDS = /^(npm|node|python|pip|ls|cat|echo|mkdir|touch|rm|cp|mv|grep|find|wc|sort|head|tail|git|npx|tsc|eslint|prettier|jest|mocha|vitest)\b/;
+      if (!ALLOWED_COMMANDS.test(p.command.trim())) {
+        cleanText = cleanText.replace(raw, `⚠ Command not allowed: ${p.command.split(' ')[0]}`);
+        continue;
+      }
+      try {
+        const { execSync } = require('child_process');
+        const output = execSync(p.command, { cwd: `${PROJECTS_DIR}/${projectId}`, timeout: 30000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 2000);
+        cleanText = cleanText.replace(raw, `⚙ Output:\n\`\`\`\n${output || '(no output)'}\n\`\`\``);
+      } catch (e) {
+        const msg = e.stderr || e.stdout || e.message || '(unknown error)';
+        cleanText = cleanText.replace(raw, `⚠ Command error:\n\`\`\`\n${String(msg).slice(0, 2000)}\n\`\`\``);
+      }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_EXEC requires a project context`);
+    }
+  }}
+
+  // ── CODE_GIT ──
+  { let m; while ((m = MARKER_RE.CODE_GIT.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.command && projectId) {
+      const ALLOWED = /^(status|diff|log|add|commit|branch|checkout|stash|push|pull|fetch|merge|reset|show|tag|init)\b/;
+      const cmdStr = p.command.trim();
+      if (!ALLOWED.test(cmdStr) || /--(force|hard|dangerous)/.test(cmdStr)) {
+        cleanText = cleanText.replace(raw, `⚠ Git command not allowed: ${cmdStr.split(' ')[0]}`);
+        continue;
+      }
+      try {
+        const { execSync } = require('child_process');
+        const fullCmd = `git ${cmdStr}`;
+        const output = execSync(fullCmd, { cwd: `${PROJECTS_DIR}/${projectId}`, timeout: 15000, maxBuffer: 50 * 1024, encoding: 'utf-8', shell: '/bin/bash' }).slice(0, 3000);
+        cleanText = cleanText.replace(raw, `🔧 Git ${cmdStr}:\n\`\`\`\n${output || '(no output)'}\n\`\`\``);
+      } catch (e) {
+        const msg = e.stderr || e.stdout || e.message || '(unknown error)';
+        cleanText = cleanText.replace(raw, `⚠ Git error:\n\`\`\`\n${String(msg).slice(0, 2000)}\n\`\`\``);
+      }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CODE_GIT requires a project context`);
+    }
+  }}
+
+  // ── SPAWN_AGENT ──
+  { let m; while ((m = MARKER_RE.SPAWN_AGENT.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.task && projectId) {
+      try {
+        const sessionId = `agent_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const model = p.model || 'openai';
+        const type = p.type || 'sub-agent';
+        await spawnSubAgent(uid, projectId, sessionId, p.task, model, type);
+        cleanText = cleanText.replace(raw, `🤖 Spawned agent (ID: ${sessionId}) for task: ${p.task.slice(0, 60)}...\nProgress: /api/projects/${projectId}/agents/${sessionId}`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Spawn agent error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ SPAWN_AGENT requires a project context`);
+    }
+  }}
+
+  // ── CHECK_AGENT ──
+  { let m; while ((m = MARKER_RE.CHECK_AGENT.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.sessionId && projectId) {
+      try {
+        const snap = await gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}`).once('value');
+        const agent = snap.val();
+        if (!agent) {
+          cleanText = cleanText.replace(raw, `⚠ Agent session not found: ${p.sessionId}`);
+        } else {
+          cleanText = cleanText.replace(raw, `🤖 Agent ${p.sessionId}: status=${agent.status}, progress=${agent.progress}%, result=${agent.result ? agent.result.slice(0, 200) : 'pending'}${agent.error ? ', error=' + agent.error : ''}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Check agent error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ CHECK_AGENT requires a project context`);
+    }
+  }}
+
+  // ── TALK_TO_AGENT ──
+  { let m; while ((m = MARKER_RE.TALK_TO_AGENT.exec(text)) !== null) {
+    const raw = m[0];
+    let p;
+    try { p = JSON.parse(m[1]); } catch {}
+    if (p && p.sessionId && p.message && projectId) {
+      try {
+        const snap = await gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}`).once('value');
+        const agent = snap.val();
+        if (!agent) {
+          cleanText = cleanText.replace(raw, `⚠ Agent session not found: ${p.sessionId}`);
+        } else {
+          // Send message to agent's conversation history
+          const convRef = gmailDb().ref(`projects/${projectId}/agents/${p.sessionId}/conversation`);
+          await convRef.push({ role: 'user', content: p.message, timestamp: Date.now() });
+          cleanText = cleanText.replace(raw, `💬 Message sent to agent ${p.sessionId}`);
+        }
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Talk to agent error: ${e.message}`); }
+    } else if (!projectId) {
+      cleanText = cleanText.replace(raw, `⚠ TALK_TO_AGENT requires a project context`);
+    }
+  }}
+
+  // ── ASK_USER ──
+  { let m; while ((m = MARKER_RE.ASK_USER.exec(text)) !== null) {
+    const raw = m[0];
+    let question = m[1] ? m[1].trim() : '';
+    if (projectId) {
+      try {
+        await gmailDb().ref(`projects/${projectId}/_pendingQuestion`).set({ question, askedAt: Date.now() });
+        cleanText = cleanText.replace(raw, `\n\n⏸ [ASKING YOU: ${question}]\nPlease check the project dashboard and provide your answer.\n\n`);
+      } catch (e) { cleanText = cleanText.replace(raw, `⚠ ASK_USER error: ${e.message}`); }
+    } else {
+      // For non-project chats, just show the question
+      cleanText = cleanText.replace(raw, `\n\n❓ ${question || 'Question pending...'}\n`);
     }
   }}
 
@@ -4782,7 +5419,7 @@ function parseNextRun(schedule, timezone) {
 app.post("/api/tasks/create", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
-    const { prompt, schedule, agent, type, maxRuns, interval, timezone } = req.body;
+    const { prompt, schedule, agent, type, maxRuns, interval, timezone, projectId } = req.body;
     if (!prompt) return res.status(400).json({ error: "prompt required" });
 
     const now = Date.now();
@@ -4797,6 +5434,7 @@ app.post("/api/tasks/create", async (req, res) => {
       agent: agent || 'openai',
       type: type || 'scheduled',
       interval: interval || 7200000,
+      projectId: projectId || null,
       lastRun: 0,
       nextRun,
       totalRuns: 0,
@@ -4905,7 +5543,7 @@ async function executeSingleTask(uid, taskId, task) {
   const messages = [systemMsg, ...history.slice(-10), userMsg];
 
   const llmResponse = await callModelBackend(task.agent, messages);
-  const { cleanText } = await processMarkers(llmResponse, uid);
+  const { cleanText } = await processMarkers(llmResponse, uid, task.projectId || null);
 
   const isComplete = cleanText.includes('[TASK_COMPLETE]') || cleanText.includes('✅ Task complete');
   const newConversationHistory = [...history, { role: 'assistant', content: cleanText.replace('[TASK_COMPLETE]', '').trim() }];
