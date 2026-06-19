@@ -1946,7 +1946,43 @@ app.post("/api/projects/project-chat", async (req, res) => {
       if (userSnap.val()) agentType = userSnap.val();
     } catch {}
 
-    // Build system prompt with file context and agent ratings
+    // ── Skills context injection ──
+    let skillsInjection = '';
+    try {
+      const selected = selectSkills(message, { limit: 4 });
+      const ctx = buildSkillContext(selected);
+      if (ctx) skillsInjection = '\n\n' + ctx;
+    } catch (e) { /* skill injection non-critical */ }
+
+    // ── Memory injection ──
+    let memoryInjection = '';
+    try {
+      const memSnap = await gmailDb().ref(`memories/${uid}`).once('value');
+      const mems = memSnap.val() || {};
+      const entries = Object.values(mems).filter(m => m.content);
+      if (entries.length) {
+        const formatted = entries.map(m => {
+          if (m.content.includes('\n')) {
+            return m.content.split('\n').filter(Boolean).map((line, i) => i === 0 ? line : '  ' + line).join('\n');
+          }
+          return m.content;
+        }).join('\n');
+        memoryInjection = '\n\n[Your existing memories about the user]\n' + formatted + '\n\nUse SAVE_MEMORY to store new facts.';
+      }
+    } catch (e) { console.error('📝 Memory fetch error:', e.message); }
+
+    // ── Web search injection ──
+    let webInjection = '';
+    if (/news|latest|today|current|search|web|recent|what.?s.new/i.test(message)) {
+      try {
+        const webContext = await executeAgenticSearch(agentType, message);
+        if (webContext) {
+          webInjection = '\n\n' + formatWebContextForPrompt(webContext);
+        }
+      } catch (e) { /* web search non-critical */ }
+    }
+
+    // Build system prompt with file context, agent ratings, skills, memories, web search
     const files = await listFiles(projectId);
     const fileList = Object.values(files).map(f => `${f.path || f.name} (${f.language || 'unknown'}, ${f.size || 0} bytes)`).join('\n');
     const ratings = await getAgentRating(agentType);
@@ -1979,6 +2015,9 @@ Description: ${p.description || 'N/A'}
 ${fileList ? `\nFiles in project:\n${fileList}` : '\nNo files yet — use CODE_WRITE to create them.'}
 
 ${ratingStr}
+${skillsInjection}
+${memoryInjection}
+${webInjection}
 
 Available markers (use EXACT format with square brackets — every marker MUST start with [MARKER and end with [/MARKER]):
 
@@ -5924,7 +5963,15 @@ async function executeSingleTask(uid, taskId, task) {
     }
   } catch (e) { console.error('⏰ Memory fetch error:', e.message); }
 
-  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${memoryInjection}${contextStr}` };
+  // ── Skills context injection ──
+  let skillsInjection = '';
+  try {
+    const selected = selectSkills(task.prompt, { limit: 4 });
+    const ctx = buildSkillContext(selected);
+    if (ctx) skillsInjection = '\n\n' + ctx;
+  } catch (e) { /* skill injection non-critical */ }
+
+  const systemMsg = { role: 'system', content: `You are an autonomous AI agent. Your task:\n${task.prompt}\n\nExecute the actions requested. Use markers (GMAIL_SEND, CALENDAR_DELETE, etc.) to perform operations.${markerExamples}${completeHint}${memoryInjection}${skillsInjection}${contextStr}` };
   const userContent = task.type === 'continuous'
     ? `Continue your recurring task (runs every ${((task.interval || 60000)/60000).toFixed(0)} min). Previous conversation:\n${history.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n---\nRepeat your action. Do NOT mark as complete — this runs automatically on schedule.`
     : `Execute your task now. Use the available tools (markers) to perform the requested actions.${webInjection}`;
