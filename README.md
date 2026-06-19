@@ -333,4 +333,5 @@ The server works with partial keys — missing keys return a clear error message
 3. **Markers in LLM output** — instead of building a function-calling system, the server scans AI responses for `[MARKER]` patterns and executes them post-stream. This is simpler and works with any model.
 4. **Automatic agent fallback** — Deep Research and Chat routes automatically fall back to an available agent if the requested one's key is missing.
 5. **Response style instruction** — all agents receive a "concise by default" instruction that keeps responses short unless depth is required.
+7. **UI update** — Fixed integration button layout on frontend to prevent overlap on wide screens.
 6. **DuckDuckGo as free fallback** — the organic HTML scraper works without any API key, keeping search available even without Tavily/SerpAPI.
