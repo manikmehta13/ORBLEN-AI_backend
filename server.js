@@ -2866,8 +2866,123 @@ const MARKER_RE = {
    MARK_COMPLETE:      /\[MARK_COMPLETE\]([\s\S]*?)\[\/MARK_COMPLETE\]/gs,
  };
 
+/**
+ * Auto-wraps bare JSON payloads that look like marker data (missing [MARKER] brackets)
+ * Handles the common case where the LLM outputs {"path":"file.js","content":"..."} instead of
+ * [CODE_WRITE]{"path":"file.js","content":"..."}[/CODE_WRITE]
+ */
+function autoWrapBareMarkers(text) {
+  if (!text) return text;
+  
+  const markerTypes = [
+    { keys: ['path', 'content'], marker: 'CODE_WRITE' },
+    { keys: ['path', 'oldString', 'newString'], marker: 'CODE_EDIT' },
+    { keys: ['path'], exclude: ['content', 'oldString', 'newString', 'command', 'pattern'], marker: 'CODE_READ' },
+    { keys: ['pattern'], exclude: ['path', 'command', 'content'], marker: 'CODE_GLOB' },
+    { keys: ['pattern', 'path'], marker: 'CODE_GREP' },
+    { keys: ['command'], exclude: ['path', 'oldString', 'content', 'pattern'], marker: 'CODE_EXEC' },
+    { keys: ['task'], exclude: ['command', 'path'], marker: 'SPAWN_AGENT' },
+    { keys: ['sessionId'], exclude: ['task', 'path', 'command'], marker: 'CHECK_AGENT' },
+    { keys: ['to', 'subject', 'body'], marker: 'GMAIL_SEND' },
+    { keys: ['id'], exclude: ['task', 'path', 'command', 'sessionId'], marker: 'CALENDAR_DELETE' },
+    { keys: ['title', 'body'], marker: 'DOCS_CREATE' },
+  ];
+
+  const result = [];
+  let i = 0;
+  
+  while (i < text.length) {
+    // Check if we're already inside [MARKER] brackets
+    const before = text.slice(0, i);
+    const lastOpenBracket = before.lastIndexOf('[');
+    const lastCloseBracket = before.lastIndexOf(']');
+    // If last '[' is a marker opening and not yet closed
+    const insideMarker = lastOpenBracket > lastCloseBracket && /\[[A-Z_]+\]$/.test(before.slice(lastOpenBracket));
+    
+    if (text[i] === '{' && !insideMarker) {
+      // Extract balanced JSON (handle strings with braces inside)
+      let depth = 0;
+      let j = i;
+      let inStr = false;
+      let esc = false;
+      
+      while (j < text.length) {
+        const c = text[j];
+        if (esc) { esc = false; j++; continue; }
+        if (c === '\\' && inStr) { esc = true; j++; continue; }
+        if (c === '"') { inStr = !inStr; j++; continue; }
+        if (!inStr) {
+          if (c === '{') depth++;
+          if (c === '}') { depth--; if (depth === 0) { j++; break; } }
+        }
+        j++;
+      }
+      
+      if (depth === 0) {
+        const jsonStr = text.slice(i, j);
+        let parsed;
+        try { parsed = JSON.parse(jsonStr); } catch { parsed = null; }
+        
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Check if already has projectId (which means it might be used from non-project context)
+          const wrapped = wrapBareJson(parsed, markerTypes);
+          if (wrapped) {
+            // Keep the original JSON but replace with wrapped version
+            // Only if it's NOT inside a code block
+            const prefixLines = text.slice(Math.max(0, i - 500), i);
+            const inCodeBlock = (prefixLines.match(/```/g) || []).length % 2 === 1;
+            if (!inCodeBlock) {
+              result.push(wrapped);
+              i = j;
+              continue;
+            }
+          }
+        }
+      }
+    }
+    
+    result.push(text[i]);
+    i++;
+  }
+  
+  return result.join('');
+}
+
+function wrapBareJson(parsed, markerTypes) {
+  const keys = Object.keys(parsed);
+  
+  for (const mt of markerTypes) {
+    if (mt.keys.length === 0) continue;
+    const hasAllKeys = mt.keys.every(k => keys.includes(k));
+    if (!hasAllKeys) continue;
+    
+    if (mt.exclude) {
+      const hasExcluded = mt.exclude.some(k => keys.includes(k));
+      if (hasExcluded) continue;
+    }
+    
+    // For "command" type, detect if it's a git command
+    let markerName = mt.marker;
+    if (markerName === 'CODE_EXEC' && parsed.command) {
+      const firstWord = parsed.command.trim().split(' ')[0];
+      if (['add', 'commit', 'push', 'pull', 'status', 'diff', 'log', 'branch', 'checkout', 'stash', 'fetch', 'merge', 'init', 'tag', 'reset', 'show'].includes(firstWord)) {
+        markerName = 'CODE_GIT';
+      }
+    }
+    
+    const jsonStr = JSON.stringify(parsed);
+    return `[${markerName}]${jsonStr}[/${markerName}]`;
+  }
+  
+  return null;
+}
+
 async function processMarkers(text, uid, projectId = null) {
   if (!text || !uid) return { cleanText: text || '' };
+  
+  // Auto-wrap bare JSON payloads that look like marker data (LLM often forgets brackets)
+  text = autoWrapBareMarkers(text);
+  
   let cleanText = text;
 
   function parseMarkerJsonOrAttrs(str) {
