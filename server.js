@@ -1383,15 +1383,20 @@ app.post("/api/people/list", async (req, res) => {
   try {
     const uid = await getUserUid(req.headers.authorization);
     const { query, maxResults } = req.body;
-    if (!query) return res.status(400).json({ error: "query required" });
     const token = await getPeopleAccessToken(uid);
-    const params = new URLSearchParams({ query, pageSize: String(Math.min(maxResults || 10, 50)), readMask: PEOPLE_FIELDS });
-    const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    const data = await searchRes.json();
-    if (!searchRes.ok) throw new Error(data.error?.message || `People API error (${searchRes.status})`);
-    res.json({ contacts: (data.results || []).map(r => r.person).filter(Boolean) });
+    if (query) {
+      const params = new URLSearchParams({ query, pageSize: String(Math.min(maxResults || 10, 50)), readMask: PEOPLE_FIELDS });
+      const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await searchRes.json();
+      if (!searchRes.ok) throw new Error(data.error?.message || `People API error (${searchRes.status})`);
+      res.json({ contacts: (data.results || []).map(r => r.person).filter(Boolean) });
+    } else {
+      const params = new URLSearchParams({ pageSize: String(Math.min(maxResults || 20, 200)), personFields: PEOPLE_FIELDS });
+      const listRes = await fetch(`${PEOPLE_API}/people/me/connections?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await listRes.json();
+      if (!listRes.ok) throw new Error(data.error?.message || `People API error (${listRes.status})`);
+      res.json({ contacts: (data.connections || []).filter(Boolean) });
+    }
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -3084,16 +3089,31 @@ async function processMarkers(text, uid) {
   { let m; while ((m = MARKER_RE.PEOPLE_LIST.exec(text)) !== null) {
     const raw = m[0]; let p;
     try { p = JSON.parse(m[1]); } catch {}
-    if (p && p.query) {
+    if (p) {
       try {
         const token = await getPeopleAccessToken(uid);
-        const params = new URLSearchParams({ query: p.query, pageSize: String(Math.min(p.maxResults || 10, 50)), readMask: PEOPLE_FIELDS });
-        const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, { headers: { Authorization: `Bearer ${token}` } });
-        const data = await searchRes.json();
-        if (!searchRes.ok) throw new Error(data.error?.message || searchRes.statusText);
-        const persons = (data.results || []).map(r => r.person).filter(Boolean);
+        const maxResults = p.maxResults || 20;
+        let persons = [];
+        let label = '';
+
+        if (p.query) {
+          const params = new URLSearchParams({ query: p.query, pageSize: String(Math.min(maxResults, 50)), readMask: PEOPLE_FIELDS });
+          const searchRes = await fetch(`${PEOPLE_API}/people:searchContacts?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+          const data = await searchRes.json();
+          if (!searchRes.ok) throw new Error(data.error?.message || searchRes.statusText);
+          persons = (data.results || []).map(r => r.person).filter(Boolean);
+          label = `"${p.query}"`;
+        } else {
+          const params = new URLSearchParams({ pageSize: String(Math.min(maxResults, 200)), personFields: PEOPLE_FIELDS });
+          const listRes = await fetch(`${PEOPLE_API}/people/me/connections?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+          const data = await listRes.json();
+          if (!listRes.ok) throw new Error(data.error?.message || listRes.statusText);
+          persons = (data.connections || []).filter(Boolean);
+          label = `(all — ${persons.length} total)`;
+        }
+
         if (!persons.length) {
-          cleanText = cleanText.replace(raw, `📇 No contacts matching "${p.query}".`);
+          cleanText = cleanText.replace(raw, `📇 No contacts${label ? ' matching ' + label : ''}.`);
         } else {
           const blocks = persons.map((c, i) => {
             const name = c.names?.[0]?.displayName || 'Unknown';
@@ -3106,7 +3126,7 @@ async function processMarkers(text, uid) {
             lines.push(`   🆔 ${id.slice(0, 5)}…${id.slice(-4)}`);
             return lines.join('\n');
           });
-          cleanText = cleanText.replace(raw, `📇 Contacts matching "${p.query}":\n${blocks.join('\n')}`);
+          cleanText = cleanText.replace(raw, `📇 Contacts ${label}:\n${blocks.join('\n')}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People list error: ${e.message}`); }
     }
