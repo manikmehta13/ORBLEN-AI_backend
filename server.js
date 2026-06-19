@@ -3095,15 +3095,18 @@ async function processMarkers(text, uid) {
         if (!persons.length) {
           cleanText = cleanText.replace(raw, `📇 No contacts matching "${p.query}".`);
         } else {
-          const lines = persons.map((c, i) => {
+          const blocks = persons.map((c, i) => {
             const name = c.names?.[0]?.displayName || 'Unknown';
-            const email = c.emailAddresses?.map(e => e.value).join(', ') || '';
-            const phone = c.phoneNumbers?.map(n => n.value).join(', ') || '';
-            const org = c.organizations?.map(o => o.name).filter(Boolean).join(', ') || '';
-            const extra = [email, phone, org].filter(Boolean).join(' — ');
-            return `${i + 1}. ${name}${extra ? ' (' + extra + ')' : ''} (resourceName: ${c.resourceName})`;
+            const lines = [`${i + 1}️⃣ ${name}`];
+            if (c.emailAddresses?.length) c.emailAddresses.forEach(e => lines.push(`   📧 ${e.value}`));
+            if (c.phoneNumbers?.length) c.phoneNumbers.forEach(n => lines.push(`   📞 ${n.value}${n.type ? ' (' + n.type + ')' : ''}`));
+            if (c.organizations?.length) c.organizations.forEach(o => lines.push(`   🏢 ${[o.name, o.title].filter(Boolean).join(' — ')}`));
+            if (c.addresses?.length) c.addresses.forEach(a => lines.push(`   🏠 ${a.formattedValue}`));
+            const id = c.resourceName?.replace('people/', '') || '';
+            lines.push(`   🆔 ${id.slice(0, 5)}…${id.slice(-4)}`);
+            return lines.join('\n');
           });
-          cleanText = cleanText.replace(raw, `📇 Contacts matching "${p.query}":\n${lines.join('\n')}`);
+          cleanText = cleanText.replace(raw, `📇 Contacts matching "${p.query}":\n${blocks.join('\n')}`);
         }
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People list error: ${e.message}`); }
     }
@@ -3121,20 +3124,23 @@ async function processMarkers(text, uid) {
         const data = await getRes.json();
         if (!getRes.ok) throw new Error(data.error?.message || getRes.statusText);
         const c = data;
-        const lines = [];
-        if (c.names?.[0]) lines.push(`Name: ${c.names.map(n => n.displayName).join(', ')}`);
-        if (c.emailAddresses?.length) lines.push(`Email: ${c.emailAddresses.map(e => e.value).join(', ')}`);
-        if (c.phoneNumbers?.length) lines.push(`Phone: ${c.phoneNumbers.map(n => `${n.value}${n.type ? ' (' + n.type + ')' : ''}`).join(', ')}`);
-        if (c.addresses?.length) lines.push(`Address: ${c.addresses.map(a => a.formattedValue).join(', ')}`);
+        const lines = ['📇 Contact Details:'];
+        if (c.names?.[0]) lines.push(`👤 ${c.names.map(n => n.displayName).join(', ')}`);
+        if (c.nicknames?.length) lines.push(`😄 ${c.nicknames.map(n => n.value).join(', ')}`);
+        if (c.emailAddresses?.length) c.emailAddresses.forEach(e => lines.push(`📧 ${e.value}${e.type ? ' (' + e.type + ')' : ''}`));
+        if (c.phoneNumbers?.length) c.phoneNumbers.forEach(n => lines.push(`📞 ${n.value}${n.type ? ' (' + n.type + ')' : ''}`));
+        if (c.addresses?.length) c.addresses.forEach(a => lines.push(`🏠 ${a.formattedValue}${a.type ? ' (' + a.type + ')' : ''}`));
         if (c.birthdays?.length) {
           const b = c.birthdays[0].date;
-          lines.push(`Birthday: ${b.month}/${b.day}${b.year ? '/' + b.year : ''}`);
+          const bday = [b.month, b.day].join('/') + (b.year ? '/' + b.year : '');
+          lines.push(`🎂 ${bday}`);
         }
-        if (c.organizations?.length) lines.push(`Organization: ${c.organizations.map(o => [o.name, o.title].filter(Boolean).join(' - ')).join(', ')}`);
-        if (c.biographies?.length) lines.push(`Bio: ${c.biographies[0].value}`);
-        if (c.nicknames?.length) lines.push(`Nickname: ${c.nicknames.map(n => n.value).join(', ')}`);
-        if (c.urls?.length) lines.push(`URLs: ${c.urls.map(u => u.value).join(', ')}`);
-        cleanText = cleanText.replace(raw, `📇 Contact: ${c.resourceName}\n${lines.join('\n')}`);
+        if (c.organizations?.length) c.organizations.forEach(o => lines.push(`🏢 ${[o.name, o.title, o.department].filter(Boolean).join(' — ')}`));
+        if (c.biographies?.length) lines.push(`📝 ${c.biographies[0].value}`);
+        if (c.urls?.length) c.urls.forEach(u => lines.push(`🔗 ${u.value}`));
+        const id = c.resourceName?.replace('people/', '') || '';
+        lines.push(`🆔 ${id}`);
+        cleanText = cleanText.replace(raw, lines.join('\n'));
       } catch (e) { cleanText = cleanText.replace(raw, `⚠ People get error: ${e.message}`); }
     }
   }}
