@@ -408,25 +408,12 @@ app.post("/api/gmail/search", async (req, res) => {
     if (!data.messages || data.messages.length === 0) return res.json({ messages: [] });
     const details = await Promise.all(data.messages.slice(0, 10).map(async (m) => {
       try {
-        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}?format=full`, {
+        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         const d = await r.json();
         const headers = (d.payload?.headers || []).reduce((acc, h) => { acc[h.name] = h.value; return acc; }, {});
-        const { body, html, attachments } = parseMimeParts(d.payload);
-        const links = html ? extractLinks(html) : [];
-        const cleanPreview = body ? cleanEmailBody(body) : '';
-        return {
-          id: m.id,
-          from: headers.From || "",
-          to: headers.To || "",
-          subject: headers.Subject || "",
-          date: headers.Date || "",
-          snippet: d.snippet || "",
-          preview: cleanPreview.length > 400 ? cleanPreview.slice(0, 400) + '…' : cleanPreview,
-          links: links.slice(0, 5),
-          attachments: attachments.slice(0, 5)
-        };
+        return { id: m.id, from: headers.From || "", subject: headers.Subject || "", date: headers.Date || "", snippet: d.snippet || "" };
       } catch { return null; }
     }));
     res.json({ messages: details.filter(Boolean) });
@@ -2477,7 +2464,7 @@ async function processMarkers(text, uid) {
         if (searchRes.ok && data.messages?.length) {
           const rows = (await Promise.all(data.messages.slice(0, 10).map(async (msg) => {
             try {
-              const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=full`, {
+              const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, {
                 headers: { Authorization: `Bearer ${token}` }
               });
               const d = await r.json();
@@ -2485,22 +2472,12 @@ async function processMarkers(text, uid) {
               const cleanFrom = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               const cleanSubject = hdrs.Subject || '(No Subject)';
               const cleanDate = hdrs.Date ? hdrs.Date.split(' ').slice(0, 4).join(' ') : '';
-              const { body } = parseMimeParts(d.payload);
-              const preview = body ? cleanEmailBody(body) : d.snippet || '';
-              const truncated = preview.length > 300 ? preview.slice(0, 300) + '…' : preview;
-              const sanitized = truncated
-                .replace(/\[image:[^\]]*\]/gi, '')
-                .replace(/[|]/g, ' ')
-                .replace(/\n/g, ' ')
-                .replace(/\r/g, '')
-                .replace(/\s{2,}/g, ' ')
-                .trim();
-              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${sanitized} | \`${msg.id}\` |`;
+              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** | \`${msg.id}\` |`;
             } catch { return null; }
           }))).filter(Boolean);
           const table = [
             `### 📧 Gmail Search Results for "${p.query}"`,
-            `| From & Date | Subject & Snippet | ID |`,
+            `| From & Date | Subject | ID |`,
             `| :--- | :--- | :--- |`,
             ...rows
           ].join('\n');
@@ -2530,7 +2507,7 @@ async function processMarkers(text, uid) {
           const cleanBody = body ? cleanEmailBody(body) : '(no plain text body found)';
           const links = html ? extractLinks(html) : [];
           const from = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const truncatedBody = cleanBody.slice(0, 4000).split('\n').map(line => `> ${line}`).join('\n');
+          const truncatedBody = cleanBody.slice(0, 20000).split('\n').map(line => `> ${line}`).join('\n');
           let card = [
             `### 📧 Email: ${hdrs.Subject || '(No Subject)'}`,
             `> **From:** ${from}`,
