@@ -2487,8 +2487,15 @@ async function processMarkers(text, uid) {
               const cleanDate = hdrs.Date ? hdrs.Date.split(' ').slice(0, 4).join(' ') : '';
               const { body } = parseMimeParts(d.payload);
               const preview = body ? cleanEmailBody(body) : d.snippet || '';
-              const displayPreview = preview.length > 300 ? preview.slice(0, 300) + '…' : preview;
-              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${displayPreview} | \`${msg.id}\` |`;
+              const truncated = preview.length > 300 ? preview.slice(0, 300) + '…' : preview;
+              const sanitized = truncated
+                .replace(/\[image:[^\]]*\]/gi, '')
+                .replace(/[|]/g, ' ')
+                .replace(/\n/g, ' ')
+                .replace(/\r/g, '')
+                .replace(/\s{2,}/g, ' ')
+                .trim();
+              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${sanitized} | \`${msg.id}\` |`;
             } catch { return null; }
           }))).filter(Boolean);
           const table = [
