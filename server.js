@@ -442,6 +442,40 @@ function cleanEmailBody(body) {
   return body.trim();
 }
 
+// ── Extract links from HTML string ──
+function extractLinks(html) {
+  const links = [];
+  const re = /<a\s[^>]*href\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const url = m[1] || m[2] || m[3];
+    if (url && !url.startsWith('#') && !url.startsWith('mailto:')) links.push(url);
+  }
+  return [...new Set(links)];
+}
+
+// ── Walk MIME parts to collect body, links, and attachments ──
+function parseMimeParts(payload) {
+  let body = '';
+  let html = '';
+  const attachments = [];
+  const queue = [payload];
+  while (queue.length) {
+    const p = queue.shift();
+    if (p.parts) queue.push(...p.parts);
+    if (p.mimeType === 'text/plain' && p.body?.data && !body) {
+      body = Buffer.from(p.body.data, 'base64').toString('utf-8');
+    }
+    if (p.mimeType === 'text/html' && p.body?.data && !html) {
+      html = Buffer.from(p.body.data, 'base64').toString('utf-8');
+    }
+    if (p.filename && p.body?.data) {
+      attachments.push({ filename: p.filename, mimeType: p.mimeType });
+    }
+  }
+  return { body, html, attachments };
+}
+
 // ── Step 6: Read a specific email ──
 app.post("/api/gmail/read", async (req, res) => {
   try {
@@ -455,15 +489,19 @@ app.post("/api/gmail/read", async (req, res) => {
     const data = await readRes.json();
     if (!readRes.ok) throw new Error(data.error?.message || `Gmail API error (${readRes.status})`);
     const headers = (data.payload?.headers || []).reduce((acc, h) => { acc[h.name] = h.value; return acc; }, {});
-    const parts = [data.payload];
-    while (parts.length) {
-      const p = parts.shift();
-      if (p.parts) parts.push(...p.parts);
-      if (p.mimeType === "text/plain" && p.body?.data) {
-        return res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: cleanEmailBody(Buffer.from(p.body.data, "base64").toString("utf-8")) });
-      }
-    }
-    res.json({ id: data.id, from: headers.From, to: headers.To, subject: headers.Subject, date: headers.Date, body: "(no plain text body found)" });
+    const { body, html, attachments } = parseMimeParts(data.payload);
+    const cleanBody = body ? cleanEmailBody(body) : '';
+    const links = html ? extractLinks(html) : [];
+    res.json({
+      id: data.id,
+      from: headers.From,
+      to: headers.To,
+      subject: headers.Subject,
+      date: headers.Date,
+      body: cleanBody || '(no plain text body found)',
+      links,
+      attachments
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2466,25 +2504,27 @@ async function processMarkers(text, uid) {
         const data = await readRes.json();
         if (readRes.ok) {
           const hdrs = (data.payload?.headers || []).reduce((a, h) => { a[h.name] = h.value; return a; }, {});
-          const parts = [data.payload];
-          let body = '(no plain text body found)';
-          while (parts.length) {
-            const pp = parts.shift();
-            if (pp.parts) parts.push(...pp.parts);
-            if (pp.mimeType === 'text/plain' && pp.body?.data) { body = Buffer.from(pp.body.data, 'base64').toString('utf-8'); break; }
-          }
+          const { body, html, attachments } = parseMimeParts(data.payload);
+          const cleanBody = body ? cleanEmailBody(body) : '(no plain text body found)';
+          const links = html ? extractLinks(html) : [];
           const from = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const cleanBody = body.slice(0, 3000).split('\n').map(line => `> ${line}`).join('\n');
-          const emailCard = [
+          const truncatedBody = cleanBody.slice(0, 4000).split('\n').map(line => `> ${line}`).join('\n');
+          let card = [
             `### 📧 Email: ${hdrs.Subject || '(No Subject)'}`,
             `> **From:** ${from}`,
             `> **Date:** ${hdrs.Date || ''}`,
             `> **ID:** \`${data.id}\``,
             `>`,
             `---`,
-            cleanBody
+            truncatedBody
           ].join('\n');
-          cleanText = cleanText.replace(raw, emailCard);
+          if (links.length) {
+            card += `\n\n**Links:**\n` + links.map(l => `- ${l}`).join('\n');
+          }
+          if (attachments.length) {
+            card += `\n\n**Attachments:**\n` + attachments.map(a => `- ${a.filename} (${a.mimeType})`).join('\n');
+          }
+          cleanText = cleanText.replace(raw, card);
         } else {
           cleanText = cleanText.replace(raw, `⚠ Gmail read failed: ${data.error?.message || readRes.statusText}`);
         }
