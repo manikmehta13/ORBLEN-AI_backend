@@ -408,12 +408,25 @@ app.post("/api/gmail/search", async (req, res) => {
     if (!data.messages || data.messages.length === 0) return res.json({ messages: [] });
     const details = await Promise.all(data.messages.slice(0, 10).map(async (m) => {
       try {
-        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+        const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}?format=full`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         const d = await r.json();
         const headers = (d.payload?.headers || []).reduce((acc, h) => { acc[h.name] = h.value; return acc; }, {});
-        return { id: m.id, from: headers.From || "", to: headers.To || "", subject: headers.Subject || "", date: headers.Date || "", snippet: d.snippet || "" };
+        const { body, html, attachments } = parseMimeParts(d.payload);
+        const links = html ? extractLinks(html) : [];
+        const cleanPreview = body ? cleanEmailBody(body) : '';
+        return {
+          id: m.id,
+          from: headers.From || "",
+          to: headers.To || "",
+          subject: headers.Subject || "",
+          date: headers.Date || "",
+          snippet: d.snippet || "",
+          preview: cleanPreview.length > 400 ? cleanPreview.slice(0, 400) + '…' : cleanPreview,
+          links: links.slice(0, 5),
+          attachments: attachments.slice(0, 5)
+        };
       } catch { return null; }
     }));
     res.json({ messages: details.filter(Boolean) });
@@ -2464,7 +2477,7 @@ async function processMarkers(text, uid) {
         if (searchRes.ok && data.messages?.length) {
           const rows = (await Promise.all(data.messages.slice(0, 10).map(async (msg) => {
             try {
-              const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+              const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msg.id)}?format=full`, {
                 headers: { Authorization: `Bearer ${token}` }
               });
               const d = await r.json();
@@ -2472,8 +2485,10 @@ async function processMarkers(text, uid) {
               const cleanFrom = (hdrs.From || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               const cleanSubject = hdrs.Subject || '(No Subject)';
               const cleanDate = hdrs.Date ? hdrs.Date.split(' ').slice(0, 4).join(' ') : '';
-              const snippet = d.snippet || '';
-              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${snippet} | \`${msg.id}\` |`;
+              const { body } = parseMimeParts(d.payload);
+              const preview = body ? cleanEmailBody(body) : d.snippet || '';
+              const displayPreview = preview.length > 300 ? preview.slice(0, 300) + '…' : preview;
+              return `| **${cleanFrom}** <br> *${cleanDate}* | **${cleanSubject}** <br> ${displayPreview} | \`${msg.id}\` |`;
             } catch { return null; }
           }))).filter(Boolean);
           const table = [
