@@ -5093,6 +5093,12 @@ app.post("/api/tasks/tick", async (req, res) => {
   res.json({ ticked: true, timestamp: Date.now(), executed });
 });
 
+const {
+  registerMcpRoutes
+} = require("./mcpBridge");
+
+registerMcpRoutes(app, { getUserUid });
+
 // Lightweight health check for Render
 app.get("/health", (req, res) => res.send("OK"));
 
