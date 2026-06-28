@@ -4487,46 +4487,110 @@ app.post("/api/search", async (req, res) => {
     });
   }
 
-  // Try Tavily first (AI-optimized with answer)
-  if ((!service || service === "auto" || service === "tavily") && process.env.TAVILY_API_KEY) {
-    const tavilyResult = await handleTavilySearch(query);
-    if (tavilyResult) {
-      const enriched = await enrichSearchResults(tavilyResult.results);
-      return res.json({
-        success: true,
-        query,
-        results: enriched,
-        answer: tavilyResult.answer,
-        service: "tavily",
-        count: enriched.length
-      });
+  // Generate 2 to 3 distinct queries for parallel search
+  let searchQueries = [query];
+  
+  const getAvailableAgent = () => {
+    if (process.env.GEMINI_API_KEY) return "gemini";
+    if (process.env.GROQ_API_KEY) return "groq";
+    if (process.env.MISTRAL_API_KEY) return "mistral";
+    return null;
+  };
+  
+  const agent = getAvailableAgent();
+  if (agent) {
+    try {
+      const prompt = `You are a Search Intent Analyzer. The user wants to find information about: "${query}".
+Output a JSON array containing 2 to 3 distinct search queries (as plain strings) that will help retrieve the most comprehensive, relevant, and updated results for this topic.
+Format: ["query 1", "query 2"]
+Do not add any markup, conversational introductory text, or explanations. Only return the raw JSON array.`;
+      
+      const resText = await callModelBackend(agent, [{ role: "user", content: prompt }]);
+      const match = resText.match(/\[[\s\S]*?\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          searchQueries = parsed.map(q => q.trim()).filter(Boolean).slice(0, 3);
+        }
+      }
+    } catch (err) {
+      console.error("[SEARCH ANALYZER] Failed to generate parallel search queries:", err.message);
     }
   }
+  
+  console.log(`[SEARCH] Planned parallel search queries: ${JSON.stringify(searchQueries)}`);
 
-  // Try SerpAPI as fallback
-  if ((!service || service === "auto" || service === "serpapi") && process.env.SERPAPI_KEY) {
-    const serpResults = await handleSerpAPISearch(query);
-    if (serpResults.length > 0) {
-      const enriched = await enrichSearchResults(serpResults);
-      return res.json({
-        success: true,
-        query,
-        results: enriched,
-        service: "serpapi",
-        count: enriched.length
-      });
+  // Execute all search queries in parallel
+  const allSearchResults = await Promise.all(
+    searchQueries.map(async (subQuery) => {
+      let results = [];
+      let serviceUsed = "duckduckgo";
+      let answer = null;
+
+      // Try Tavily
+      if ((!service || service === "auto" || service === "tavily") && process.env.TAVILY_API_KEY) {
+        const tavilyResult = await handleTavilySearch(subQuery);
+        if (tavilyResult) {
+          results = tavilyResult.results;
+          serviceUsed = "tavily";
+          answer = tavilyResult.answer;
+        }
+      }
+
+      // Try SerpAPI fallback
+      if (results.length === 0 && (!service || service === "auto" || service === "serpapi") && process.env.SERPAPI_KEY) {
+        const serpResults = await handleSerpAPISearch(subQuery);
+        if (serpResults && serpResults.length > 0) {
+          results = serpResults;
+          serviceUsed = "serpapi";
+        }
+      }
+
+      // Try DDG fallback
+      if (results.length === 0) {
+        results = await handleDuckDuckGoSearch(subQuery);
+        serviceUsed = "duckduckgo";
+      }
+
+      // Crawl and scrape top 2 pages for this query in parallel
+      const enrichedResults = await enrichSearchResults(results);
+
+      // Tag results with the sub-query name
+      const taggedResults = enrichedResults.map(r => ({
+        ...r,
+        title: `[Query: "${subQuery}"] ${r.title || "Result"}`
+      }));
+
+      return {
+        service: serviceUsed,
+        results: taggedResults,
+        answer
+      };
+    })
+  );
+
+  // Combine and merge results
+  let mergedResults = [];
+  let combinedAnswers = [];
+  
+  for (const item of allSearchResults) {
+    if (item.results) {
+      mergedResults.push(...item.results);
+    }
+    if (item.answer) {
+      combinedAnswers.push(item.answer);
     }
   }
+  
+  const finalAnswer = combinedAnswers.length > 0 ? combinedAnswers.join(" | ") : null;
 
-  // Fallback to DuckDuckGo (always works)
-  const ddgResults = await handleDuckDuckGoSearch(query);
-  const enriched = await enrichSearchResults(ddgResults);
   res.json({
     success: true,
     query,
-    results: enriched,
-    service: "duckduckgo",
-    count: enriched.length
+    results: mergedResults,
+    answer: finalAnswer,
+    service: "multi_search",
+    count: mergedResults.length
   });
 });
 
