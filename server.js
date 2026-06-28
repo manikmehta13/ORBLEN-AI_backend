@@ -4379,6 +4379,84 @@ async function handleSerpAPISearch(query) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Helper: Scrape content of a specific URL
+// ─────────────────────────────────────────────────────────────
+async function scrapeUrlContent(url) {
+  try {
+    const response = await fetchWithTimeout(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+      }
+    }, 6000); // 6 seconds timeout
+
+    if (!response.ok) {
+      throw new Error(`HTTP status ${response.status}`);
+    }
+
+    const html = await response.text();
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].replace(/<[^>]*>/g, '').trim() : url;
+
+    // Clean body HTML tags to get readable text
+    let snippet = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return {
+      title,
+      url,
+      snippet: snippet.slice(0, 3000), // Rich context snippet (up to 3000 chars)
+      source: "Direct Web Visit"
+    };
+  } catch (err) {
+    console.error(`Error visiting ${url}:`, err.message);
+    return {
+      title: "Page unreachable",
+      url,
+      snippet: `Unable to retrieve page content: ${err.message}`,
+      source: "Direct Web Visit"
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Helper: Enrich search results by scraping top pages
+// ─────────────────────────────────────────────────────────────
+async function enrichSearchResults(results) {
+  if (!results || !results.length) return results;
+  
+  // Enrich only the top 2 results in parallel to balance detail vs speed
+  return await Promise.all(
+    results.map(async (r, idx) => {
+      if (idx < 2 && r.url && r.url.startsWith("http")) {
+        const scrapeRes = await scrapeUrlContent(r.url);
+        if (scrapeRes && scrapeRes.snippet && !scrapeRes.snippet.startsWith("Unable to retrieve")) {
+          return {
+            ...r,
+            snippet: scrapeRes.snippet.slice(0, 2000), // Enrich with up to 2000 chars
+            isEnriched: true
+          };
+        }
+      }
+      return r;
+    })
+  );
+}
+
 // ═════════════════════════════════════════════════════════════
 //  ROUTE 1: Smart Web Search (Auto-selects best available)
 // ═════════════════════════════════════════════════════════════
@@ -4388,17 +4466,39 @@ app.post("/api/search", async (req, res) => {
 
   console.log(`[SEARCH] Query: "${query}" | Service: ${service || "auto"}`);
 
+  // Check if query is or contains a direct URL
+  let urls = query.match(/https?:\/\/[^\s]+/gi);
+  if (!urls) {
+    const domainMatch = query.trim().match(/^[a-zA-Z0-9.-]+\.[a-z]{2,6}(?:\/\S*)?$/i);
+    if (domainMatch) {
+      urls = [`https://${query.trim()}`];
+    }
+  }
+
+  if (urls && urls.length > 0) {
+    console.log(`[SEARCH] Direct URLs detected: ${urls.join(", ")}`);
+    const results = await Promise.all(urls.slice(0, 3).map(url => scrapeUrlContent(url)));
+    return res.json({
+      success: true,
+      query,
+      results,
+      service: "direct_visit",
+      count: results.length
+    });
+  }
+
   // Try Tavily first (AI-optimized with answer)
   if ((!service || service === "auto" || service === "tavily") && process.env.TAVILY_API_KEY) {
     const tavilyResult = await handleTavilySearch(query);
     if (tavilyResult) {
+      const enriched = await enrichSearchResults(tavilyResult.results);
       return res.json({
         success: true,
         query,
-        results: tavilyResult.results,
+        results: enriched,
         answer: tavilyResult.answer,
         service: "tavily",
-        count: tavilyResult.results.length
+        count: enriched.length
       });
     }
   }
@@ -4407,24 +4507,26 @@ app.post("/api/search", async (req, res) => {
   if ((!service || service === "auto" || service === "serpapi") && process.env.SERPAPI_KEY) {
     const serpResults = await handleSerpAPISearch(query);
     if (serpResults.length > 0) {
+      const enriched = await enrichSearchResults(serpResults);
       return res.json({
         success: true,
         query,
-        results: serpResults,
+        results: enriched,
         service: "serpapi",
-        count: serpResults.length
+        count: enriched.length
       });
     }
   }
 
   // Fallback to DuckDuckGo (always works)
   const ddgResults = await handleDuckDuckGoSearch(query);
+  const enriched = await enrichSearchResults(ddgResults);
   res.json({
     success: true,
     query,
-    results: ddgResults,
+    results: enriched,
     service: "duckduckgo",
-    count: ddgResults.length
+    count: enriched.length
   });
 });
 
