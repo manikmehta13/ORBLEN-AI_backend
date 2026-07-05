@@ -19,20 +19,15 @@ Client (Cloudflare Pages)
 │                                                           │
 │  ┌──────────────────────────────────┐                     │
 │  │  AI Agent Routes                 │                     │
-│  │  /api/openai    → NVIDIA NIM     │────▶ build.nvidia.com│
 │  │  /api/gemini    → Google Gemini  │────▶ googleapis.com  │
 │  │  /api/mistral   → Mistral AI     │────▶ api.mistral.ai  │
 │  │  /api/codestral → Codestral      │────▶ codestral.mistral.ai
 │  │  /api/groq      → Groq           │────▶ api.groq.com    │
-│  │  /api/cohere    → Cohere         │────▶ api.cohere.com  │
-│  │  /api/nvidia-llama → NVIDIA NIM  │────▶ integrate.api.nvidia.com
-│  │  /api/deepseek  → NVIDIA NIM     │────▶ (Kimi K2.6)     │
-│  │  /api/gemma4    → NVIDIA NIM     │────▶ (Gemma 4 31B)   │
 │  └──────────────────────────────────┘                     │
 │                                                           │
 │  ┌──────────────────────────────────┐                     │
 │  │  Prompt Enhancer                 │                     │
-│  │  /api/enhance (Groq → NVIDIA)    │                     │
+│  │  /api/enhance (Groq)             │                     │
 │  └──────────────────────────────────┘                     │
 │                                                           │
 │  ┌──────────────────────────────────┐                     │
@@ -77,19 +72,14 @@ ORBLEN-AI_backend/
 
 ## API Routes
 
-### AI Agents (9 Models)
+### AI Agents (4 Models)
 
 | Method | Route | Agent | Provider | Model |
 |---|---|---|---|---|
-| POST | `/api/openai` | GPT-OSS 120B | NVIDIA NIM | `openai/gpt-oss-120b` |
-| POST | `/api/nvidia-llama` | LLaMA 3.3 70B | NVIDIA NIM | `meta/llama-3.3-70b-instruct` |
-| POST | `/api/deepseek` | Kimi K2.6 | NVIDIA NIM | `moonshotai/kimi-k2.6` |
-| POST | `/api/gemma4` | Gemma 4 31B IT | NVIDIA NIM | `google/gemma-4-31b-it` |
-| POST | `/api/gemini` | Gemini Flash | Google | `gemini-3-flash-preview` |
+| POST | `/api/gemini` | Gemini Flash | Google | `gemini-3.5-flash` |
 | POST | `/api/mistral` | Mistral Large | Mistral AI | `mistral-large-latest` |
 | POST | `/api/codestral` | Codestral | Mistral AI | `codestral-latest` |
 | POST | `/api/groq` | LLaMA 3.3 | Groq | `llama-3.3-70b-versatile` |
-| POST | `/api/cohere` | Command R+ | Cohere | `command-r-plus-08-2024` |
 
 Each agent route supports both standard and streaming responses.
 
@@ -97,7 +87,7 @@ Each agent route supports both standard and streaming responses.
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/api/enhance` | Rewrites user prompt using Groq LLaMA (primary) → NVIDIA GPT-OSS (fallback) → returns original if both fail |
+| POST | `/api/enhance` | Rewrites user prompt using Groq LLaMA (primary) → returns original if it fails |
 
 Includes a comprehensive system prompt that ensures the enhancer preserves intent, tone, and structure while improving clarity.
 
@@ -305,15 +295,10 @@ npm start
 | Variable | Required | Description |
 |---|---|---|
 | `PORT` | No | Server port (default: 4000) |
-| `NVIDIA_KEY_GPTOSS` | No | NVIDIA NIM key for GPT-OSS 120B |
-| `NVIDIA_KEY_LLAMA` | No | NVIDIA NIM key for LLaMA 3.3 70B |
-| `NVIDIA_KEY_DEEPSEEK` | No | NVIDIA NIM key for Kimi K2.6 |
-| `NVIDIA_KEY_GEMMA4` | No | NVIDIA NIM key for Gemma 4 31B |
 | `GEMINI_API_KEY` | No | Google Gemini API key |
 | `MISTRAL_API_KEY` | No | Mistral AI API key |
 | `CODESTRAL_API_KEY` | No | Codestral API key |
 | `GROQ_API_KEY` | No | Groq API key (free, recommended) |
-| `COHERE_API_KEY` | No | Cohere API key |
 | `TAVILY_API_KEY` | No | Tavily search API key |
 | `GOOGLE_CLIENT_ID` | For OAuth | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | For OAuth | Google OAuth client secret |
