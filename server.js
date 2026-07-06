@@ -656,7 +656,7 @@ If NO, output EXACTLY ONE new, improved search query to find the missing informa
 //  Called after LLM streaming completes, and by the task scheduler
 // ══════════════════════════════════════════════════════════════
 const MARKER_RE = {
-  SAVE_MEMORY:     /\[SAVE_MEMORY\](.*?)\[\/SAVE_MEMORY\]/gs,
+  SAVE_MEMORY:     /\[SAVE_MEMORY\]([\s\S]*?)\[\/SAVE_MEMORY\]/g,
 };
 
 async function processMarkers(text, uid) {
@@ -664,57 +664,66 @@ async function processMarkers(text, uid) {
   let cleanText = text;
 
   // ── SAVE_MEMORY ──
-  { let m; while ((m = MARKER_RE.SAVE_MEMORY.exec(text)) != null) {
-    const raw = m[0];
-    let p;
-    try { p = JSON.parse(m[1]); } catch {}
-    if (p && typeof p === 'object') {
-      try {
-        const memRef = getDatabase().ref(`memories/${uid}`);
-        const snap = await memRef.once('value');
-        const existing = snap.val() || {};
+  {
+    const matches = [...text.matchAll(MARKER_RE.SAVE_MEMORY)];
+    for (const m of matches) {
+      const raw = m[0];
+      let p;
+      try { p = JSON.parse(m[1]); } catch {}
+      if (p && typeof p === 'object') {
+        try {
+          const memRef = getDatabase().ref(`memories/${uid}`);
+          const snap = await memRef.once('value');
+          const existing = snap.val() || {};
 
-        // Helper to format a value as YAML-like string
-        function formatMemoryValue(v, indent = 0) {
-          const pad = '  '.repeat(indent);
-          if (v === null || v === undefined) return '';
-          if (typeof v === 'string') return v;
-          if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-          if (Array.isArray(v)) return v.map(item => `\n${pad}- ${formatMemoryValue(item, indent + 1)}`).join('');
-          if (typeof v === 'object') {
-            const keys = Object.keys(v);
-            if (keys.length === 0) return '';
-            return keys.map(k => `\n${pad}${k}: ${formatMemoryValue(v[k], indent + 1)}`).join('');
+          function formatMemoryValue(v, indent = 0) {
+            const pad = '  '.repeat(indent);
+            if (v === null || v === undefined) return '';
+            if (typeof v === 'string') return v;
+            if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+            if (Array.isArray(v)) return v.map(item => `\n${pad}- ${formatMemoryValue(item, indent + 1)}`).join('');
+            if (typeof v === 'object') {
+              const keys = Object.keys(v);
+              if (keys.length === 0) return '';
+              return keys.map(k => `\n${pad}${k}: ${formatMemoryValue(v[k], indent + 1)}`).join('');
+            }
+            return String(v);
           }
-          return String(v);
-        }
 
-        // Use raw top-level keys as categories (personal_information, education, projects, etc.)
-        // One memory entry per unique key. Same key replaces old entry with that key.
-        function replaceOrCreate(category, content) {
-          const existingIds = Object.entries(existing)
-            .filter(([, mem]) => mem.category === category)
-            .map(([id]) => id);
-          for (const id of existingIds) memRef.child(id).remove();
-          const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-          memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
-        }
-
-        if (p.content) {
-          replaceOrCreate(p.category || 'others', p.content.trim());
-          cleanText = cleanText.replace(raw, `🧠 Memory saved`);
-        } else {
-          let count = 0;
-          for (const [cat, data] of Object.entries(p)) {
-            if (!data) continue;
-            replaceOrCreate(cat, cat + ':' + formatMemoryValue(data));
-            count++;
+          function replaceOrCreate(category, content) {
+            const existingIds = Object.entries(existing)
+              .filter(([, mem]) => mem.category === category)
+              .map(([id]) => id);
+            for (const id of existingIds) memRef.child(id).remove();
+            const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+            memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
           }
-          cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} ${count === 1 ? 'section' : 'sections'})`);
-        }
-      } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
+
+          if (Array.isArray(p)) {
+            let count = 0;
+            for (const item of p) {
+              if (item.content) {
+                replaceOrCreate(item.category || 'others', item.content.trim());
+                count++;
+              }
+            }
+            cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} facts)`);
+          } else if (p.content) {
+            replaceOrCreate(p.category || 'others', p.content.trim());
+            cleanText = cleanText.replace(raw, `🧠 Memory saved`);
+          } else {
+            let count = 0;
+            for (const [cat, data] of Object.entries(p)) {
+              if (!data) continue;
+              replaceOrCreate(cat, cat + ':' + formatMemoryValue(data));
+              count++;
+            }
+            cleanText = cleanText.replace(raw, `🧠 Memory saved (${count} ${count === 1 ? 'section' : 'sections'})`);
+          }
+        } catch (e) { cleanText = cleanText.replace(raw, `⚠ Memory save error: ${e.message}`); }
+      }
     }
-  }}
+  }
 
   return { cleanText };
 }
