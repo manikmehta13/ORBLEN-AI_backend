@@ -669,7 +669,13 @@ async function processMarkers(text, uid) {
     for (const m of matches) {
       const raw = m[0];
       let p;
-      try { p = JSON.parse(m[1]); } catch {}
+      try { 
+        let jsonStr = m[1].trim();
+        if (jsonStr.startsWith('```')) {
+          jsonStr = jsonStr.replace(/^\s*\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`\s*$/, '').trim();
+        }
+        p = JSON.parse(jsonStr); 
+      } catch {}
       if (p && typeof p === 'object') {
         try {
           const memRef = getDatabase().ref(`memories/${uid}`);
