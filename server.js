@@ -2799,17 +2799,12 @@ app.post("/api/chat-enhanced", async (req, res) => {
     // ── STEP 4: Build final message set ──
     const BASE_SYSTEM_PROMPT = "You are Orblen AI, an advanced assistant with live search. Use provided search results to give accurate, up-to-date answers, citing sources as [1]. Default to short, concise responses with proper punctuation. Expand only when necessary for complexity or detail.";
 
-    // Memory saving instructions
-    const memorySysAppend = `\n\nYou have a persistent memory system. Use the SAVE_MEMORY marker to store facts about the user. You can save flat facts, structured data, or an array of distinct facts:\n\nFlat: [SAVE_MEMORY]{"content":"User prefers concise answers with bullet points"}[/SAVE_MEMORY]\nArray of distinct facts (RECOMMENDED for multiple new facts): [SAVE_MEMORY][{"content":"User is pursuing BCA at Chandigarh University", "category":"education"}, {"content":"User values direct communication", "category":"preferences"}][/SAVE_MEMORY]\nOnly save unique facts not already in memory (see context above). No opinions — only factual preferences and traits.`;
-
     let sysContent = BASE_SYSTEM_PROMPT;
 
     if (userMemories.length > 0) {
-      const memLines = userMemories.map(m => `• ${m.content}`).join("\n");
-      sysContent += `\n\nAdditionally, here is relevant context about the user, learned from previous conversations:\n${memLines}\n\nUse this context naturally and helpfully when relevant. Do not explicitly tell the user that you have a stored memory system — just respond in a personalized, aware way.`;
+      const memSummary = userMemories.map(m => m.content.trim()).join(". ");
+      sysContent += `\n\nUser background context: ${memSummary}\nUse this context naturally and helpfully when relevant. Do not mention that you have a stored memory system.`;
     }
-
-    sysContent += memorySysAppend;
 
     // Build web context block
     let webContextBlock = "";
@@ -2817,23 +2812,21 @@ app.post("/api/chat-enhanced", async (req, res) => {
       const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
       webContextBlock = `\n\n────────────────────────────────────────\nLIVE WEB SEARCH RESULTS\nQuery: "${searchQuery}"\nRetrieved: ${today} | Source: ${webData.service || "Web"}\n────────────────────────────────────────\n`;
       if (webData.answer) webContextBlock += `📋 AI Summary: ${webData.answer}\n\n`;
-      webData.results.slice(0, 6).forEach((r, i) => {
+      webData.results.slice(0, 3).forEach((r, i) => {
         webContextBlock += `[${i + 1}] ${r.title || "Result"}`;
         if (r.date) webContextBlock += ` (${r.date})`;
         webContextBlock += "\n";
-        const snippet = (r.snippet || r.content || "").slice(0, 350).trim();
+        const snippet = (r.snippet || r.content || "").slice(0, 180).trim();
         if (snippet) webContextBlock += `   ${snippet}\n`;
         if (r.url) webContextBlock += `   🔗 ${r.url}\n`;
         webContextBlock += "\n";
       });
-      webContextBlock += `────────────────────────────────────────\nINSTRUCTIONS:\n• SYNTHESIZE both your training knowledge AND the web data above to produce the best answer.\n• Use real-time numbers, figures, and facts from the web to make your response accurate and current.\n• Cite web sources by number, e.g. [1].\n• If web data conflicts with your training knowledge, defer to the web data (it is more current).\n• Prefer more recent sources for time-sensitive topics.\n\n`;
+      webContextBlock += `────────────────────────────────────────\n`;
     }
 
-    const recentHistory = messages.filter(m => m.role !== "system").slice(-8);
     const userMsgContent = finalPrompt + webContextBlock;
     const chatMessages = [
       { role: "system", content: sysContent },
-      ...recentHistory.slice(0, -1), // all but last (which is the current user message)
       { role: "user", content: userMsgContent }
     ];
 
