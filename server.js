@@ -112,6 +112,14 @@ app.post("/api/gemini", apiChatRoute("gemini", true));
 app.post("/api/mistral", apiChatRoute("mistral"));
 app.post("/api/codestral", apiChatRoute("codestral"));
 app.post("/api/groq", apiChatRoute("groq"));
+app.post("/api/groq-llama-8b", apiChatRoute("groq-llama-8b"));
+app.post("/api/groq-deepseek", apiChatRoute("groq-deepseek"));
+app.post("/api/groq-qwen-32b", apiChatRoute("groq-qwen-32b"));
+app.post("/api/groq-qwen-27b", apiChatRoute("groq-qwen-27b"));
+app.post("/api/groq-gemma-9b", apiChatRoute("groq-gemma-9b"));
+app.post("/api/groq-gemma-27b", apiChatRoute("groq-gemma-27b"));
+app.post("/api/groq-gpt-120b", apiChatRoute("groq-gpt-120b"));
+app.post("/api/groq-gpt-20b", apiChatRoute("groq-gpt-20b"));
 
 // ══════════════════════════════════════════════════════════════
 app.post("/api/enhance", async (req, res) => {
@@ -337,8 +345,33 @@ const BACKEND_AGENT_NAMES = {
   gemini: "Gemini Flash",
   mistral: "Mistral Large",
   codestral: "Codestral",
-  groq: "LLaMA Groq"
+  groq: "LLaMA 3.3 70B",
+  "groq-llama-8b": "LLaMA 3.1 8B",
+  "groq-deepseek": "DeepSeek R1",
+  "groq-qwen-32b": "Qwen 3 32B",
+  "groq-qwen-27b": "Qwen 3.6 27B",
+  "groq-gemma-9b": "Gemma 2 9B",
+  "groq-gemma-27b": "Gemma 2 27B",
+  "groq-gpt-120b": "GPT-OSS 120B",
+  "groq-gpt-20b": "GPT-OSS 20B"
 };
+
+// Model IDs for all Groq-hosted agents
+const GROQ_MODEL_MAP = {
+  groq: "llama-3.3-70b-versatile",
+  "groq-llama-8b": "llama-3.1-8b-instant",
+  "groq-deepseek": "deepseek-r1-distill-llama-70b",
+  "groq-qwen-32b": "qwen3-32b",
+  "groq-qwen-27b": "qwen-3.6-27b",
+  "groq-gemma-9b": "gemma2-9b-it",
+  "groq-gemma-27b": "gemma-2-27b-it",
+  "groq-gpt-120b": "openai/gpt-oss-120b",
+  "groq-gpt-20b": "openai/gpt-oss-20b"
+};
+
+function isGroqAgent(agent) {
+  return Object.prototype.hasOwnProperty.call(GROQ_MODEL_MAP, agent);
+}
 
 function getBackendAgentName(a) {
   return BACKEND_AGENT_NAMES[a] || "AI Agent";
@@ -369,11 +402,18 @@ function addResponseStyleInstructionToPrompt(prompt) {
 }
 
 function getActiveAgent(requestedAgent) {
+  // All groq-* agents share the GROQ_API_KEY
+  const groqKey = process.env.GROQ_API_KEY;
+  if (isGroqAgent(requestedAgent)) {
+    if (groqKey) return { agent: requestedAgent, fallback: false };
+    // Fallback from groq model to other providers
+  }
+
   const keys = {
     gemini: process.env.GEMINI_API_KEY,
     mistral: process.env.MISTRAL_API_KEY,
     codestral: process.env.CODESTRAL_API_KEY,
-    groq: process.env.GROQ_API_KEY
+    groq: groqKey
   };
 
   if (keys[requestedAgent]) {
@@ -447,8 +487,9 @@ async function callModelBackend(agent, messages) {
     return data.candidates[0].content.parts[0].text;
   }
 
-  if (agent === "groq") {
+  if (isGroqAgent(agent)) {
     if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+    const groqModel = GROQ_MODEL_MAP[agent];
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -456,7 +497,7 @@ async function callModelBackend(agent, messages) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: groqModel,
         messages,
         max_tokens: 8192
       })
@@ -821,12 +862,13 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiPrompt 
 
     let fullResponse = "";
 
-    if (agentName === "groq") {
+    if (isGroqAgent(agentName)) {
       if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      const groqModel = GROQ_MODEL_MAP[agentName];
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) {
@@ -2604,12 +2646,13 @@ app.post("/api/chat", async (req, res) => {
     let fullResponse = "";
     const agentName = agent;
 
-    if (agentName === "groq") {
+    if (isGroqAgent(agentName)) {
       if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      const groqModel = GROQ_MODEL_MAP[agentName];
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages, max_tokens: 8192, temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }
@@ -2831,16 +2874,17 @@ app.post("/api/chat-enhanced", async (req, res) => {
     ];
 
     // ── STEP 5: Stream the model response ──
-    sendEvent({ type: "status", message: `🤖 Asking ${(agent || "AI").charAt(0).toUpperCase() + (agent || "AI").slice(1)}…` });
+    sendEvent({ type: "status", message: `🤖 Asking ${BACKEND_AGENT_NAMES[agent] || agent}…` });
 
     let fullResponse = "";
 
-    if (agent === "groq") {
+    if (isGroqAgent(agent)) {
       if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      const groqModel = GROQ_MODEL_MAP[agent];
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }

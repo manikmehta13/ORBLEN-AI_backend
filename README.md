@@ -72,14 +72,22 @@ ORBLEN-AI_backend/
 
 ## API Routes
 
-### AI Agents (4 Models)
+### AI Agents (12 Models / 20+ Total)
 
 | Method | Route | Agent | Provider | Model |
 |---|---|---|---|---|
 | POST | `/api/gemini` | Gemini Flash | Google | `gemini-3.5-flash` |
 | POST | `/api/mistral` | Mistral Large | Mistral AI | `mistral-large-latest` |
 | POST | `/api/codestral` | Codestral | Mistral AI | `codestral-latest` |
-| POST | `/api/groq` | LLaMA 3.3 | Groq | `llama-3.3-70b-versatile` |
+| POST | `/api/groq` | LLaMA 3.3 70B | Groq | `llama-3.3-70b-versatile` |
+| POST | `/api/groq-llama-8b` | LLaMA 3.1 8B | Groq | `llama-3.1-8b-instant` |
+| POST | `/api/groq-deepseek` | DeepSeek R1 | Groq | `deepseek-r1-distill-llama-70b` |
+| POST | `/api/groq-qwen-32b` | Qwen 3 32B | Groq | `qwen3-32b` |
+| POST | `/api/groq-qwen-27b` | Qwen 3.6 27B | Groq | `qwen-3.6-27b` |
+| POST | `/api/groq-gemma-9b` | Gemma 2 9B | Groq | `gemma2-9b-it` |
+| POST | `/api/groq-gemma-27b` | Gemma 2 27B | Groq | `gemma-2-27b-it` |
+| POST | `/api/groq-gpt-120b` | GPT-OSS 120B | Groq | `openai/gpt-oss-120b` |
+| POST | `/api/groq-gpt-20b` | GPT-OSS 20B | Groq | `openai/gpt-oss-20b` |
 
 Each agent route supports both standard and streaming responses.
 
