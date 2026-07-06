@@ -2287,74 +2287,10 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  ⏰ TASK SCHEDULER — Persistent autonomous agent system
-//  Tasks stored at tasks/{uid}/{taskId} in RTDB
-// ══════════════════════════════════════════════════════════════
-
-// ── Helper: cron-like "daily at HH:MM" → next run timestamp ──
-function parseNextRun(schedule, timezone) {
-  if (!schedule) return Date.now() + 7200000; // default 2h
-  // Support "daily at HH:MM" or "HH:MM" format
-  const dailyMatch = schedule.match(/daily\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?/i) || schedule.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
-  if (dailyMatch) {
-    let h = parseInt(dailyMatch[1]), m = parseInt(dailyMatch[2]);
-    const ampm = (dailyMatch[3] || '').toLowerCase();
-    if (ampm === 'pm' && h < 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-
-    if (timezone) {
-      const fmt = new Intl.DateTimeFormat('en-CA', {
-        timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
-      });
-      const now = new Date();
-      const wall = Object.fromEntries(fmt.formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
-      let ty = parseInt(wall.year), tm = parseInt(wall.month), td = parseInt(wall.day);
-      if (h < parseInt(wall.hour) || (h === parseInt(wall.hour) && m <= parseInt(wall.minute))) {
-        const tom = new Date(ty, tm - 1, td + 1);
-        ty = tom.getFullYear(); tm = tom.getMonth() + 1; td = tom.getDate();
-      }
-      let approx = new Date(Date.UTC(ty, tm - 1, td, h, m));
-      for (let i = 0; i < 2; i++) {
-        const w2 = Object.fromEntries(fmt.formatToParts(approx).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
-        const wh = parseInt(w2.hour), wm = parseInt(w2.minute);
-        if (wh === h && wm === m) break;
-        approx = new Date(approx.getTime() + (h - wh) * 3600000 + (m - wm) * 60000);
-      }
-      return approx.getTime();
-    }
-
-    const now = new Date();
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
-    return next.getTime();
-  }
-  // Support "every X hours"
-  const everyMatch = schedule.match(/every\s+(\d+)\s*hours?/i);
-  if (everyMatch) return Date.now() + parseInt(everyMatch[1]) * 3600000;
-  // Support "every X minutes"
-  const minMatch = schedule.match(/every\s+(\d+)\s*minutes?/i);
-  if (minMatch) return Date.now() + parseInt(minMatch[1]) * 60000;
-  // Try parsing as a cron-like "0 19 * * *" (minute hour)
-  const cronMatch = schedule.match(/^(\d+)\s+(\d+)/);
-  if (cronMatch) {
-    const m = parseInt(cronMatch[1]), h = parseInt(cronMatch[2]);
-    const now = new Date();
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
-    return next.getTime();
-  }
-  return Date.now() + 7200000; // default 2h
-}
-
-// ── Create a task ──
 app.get("/health", (req, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  // Internal tick every 60 seconds — server is always warm from UptimeRobot pings
-  setInterval(() => executeDueTasks(), 60000);
   console.log(`🚀 ORBLEN AI Backend running on port ${PORT}`);
   console.log(`   Keys loaded: ${[
     process.env.GEMINI_API_KEY     ? "✅ Gemini"       : "❌ Gemini",
