@@ -764,8 +764,7 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiPrompt 
   const sendEvent = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
-
-   else if (isGeminiPrompt) {
+  if (isGeminiPrompt) {
     if (!prompt) { sendEvent({ type: "error", message: "prompt required" }); return res.end(); }
     messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
   } else {
@@ -775,14 +774,12 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiPrompt 
 
   try {
     let chatMessages;
-     else {
-      sendEvent({ type: "status", message: "🔍 Searching the web…" });
-      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
-      const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
-      chatMessages = [...messages];
-      if (webContext) {
-        chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
-      }
+    sendEvent({ type: "status", message: "🔍 Searching the web…" });
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.content || "";
+    const webContext = await executeAgenticSearch(agentName, lastUserMsg, sendEvent);
+    chatMessages = [...messages];
+    if (webContext) {
+      chatMessages[chatMessages.length - 1].content += "\n\n" + formatWebContextForPrompt(webContext);
     }
 
     sendEvent({ type: "status", message: "🤖 Generating response…" });
