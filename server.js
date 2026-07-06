@@ -720,11 +720,11 @@ async function processMarkers(text, uid) {
 }
 
 async function handleAgenticChatRoute(req, res, agentName, isGeminiPrompt = false) {
-  
   let messages = req.body.messages;
   let prompt = req.body.prompt;
+  const lowLatency = false;
   
-   else if (isGeminiPrompt) {
+  if (isGeminiPrompt) {
     if (!prompt) return res.status(400).json({ error: "prompt required" });
     messages = [{ role: "user", content: addResponseStyleInstructionToPrompt(prompt) }];
   } else {
