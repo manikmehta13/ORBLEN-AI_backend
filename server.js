@@ -671,11 +671,13 @@ async function processMarkers(text, uid) {
       let p;
       try { 
         let jsonStr = m[1].trim();
-        if (jsonStr.startsWith('```')) {
-          jsonStr = jsonStr.replace(/^\s*\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`\s*$/, '').trim();
+        const firstBrace = jsonStr.search(/[\{\[]/);
+        const lastBrace = jsonStr.search(/[\}\]][^\}\]]*$/);
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
+          jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
         }
         p = JSON.parse(jsonStr); 
-      } catch {}
+      } catch (e) { console.error('JSON parse error in processMarkers:', e.message, 'Raw JSON:', m[1]); }
       if (p && typeof p === 'object') {
         try {
           const memRef = getDatabase().ref(`memories/${uid}`);
@@ -2203,7 +2205,7 @@ app.post("/api/chat", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (authHeader) uid = await getUserUid(authHeader);
-  } catch {}
+  } catch (e) { console.error('JSON parse error in processMarkers:', e.message, 'Raw JSON:', jsonStr); }
 
   try {
     sendEvent({ type: "status", message: "🤖 Generating response…" });
