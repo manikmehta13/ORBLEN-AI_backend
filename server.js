@@ -2205,7 +2205,7 @@ app.post("/api/chat", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (authHeader) uid = await getUserUid(authHeader);
-  } catch (e) { console.error('JSON parse error in processMarkers:', e.message, 'Raw JSON:', jsonStr); }
+  } catch {}
 
   try {
     sendEvent({ type: "status", message: "🤖 Generating response…" });
