@@ -2183,6 +2183,328 @@ app.post("/api/tts", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  🔐 AUTH HELPER — verify Firebase ID token → uid
+// ══════════════════════════════════════════════════════════════
+async function getUserUid(authHeader) {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  const idToken = authHeader.slice(7).trim();
+  if (!idToken) return null;
+  if (!firebaseReady) return null;
+  try {
+    const decoded = await getAuth().verifyIdToken(idToken);
+    return decoded.uid || null;
+  } catch {
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🧠 MEMORY HELPERS — load from & save to Firebase RTDB
+// ══════════════════════════════════════════════════════════════
+
+/** Loads all memories for a user from Firebase RTDB. Returns array. */
+async function loadMemoriesFromFirebase(uid) {
+  if (!uid || !firebaseReady) return [];
+  try {
+    const snap = await getDatabase().ref(`memories/${uid}`).once("value");
+    const val = snap.val();
+    if (!val || typeof val !== "object") return [];
+    return Object.values(val)
+      .filter(m => m && typeof m.content === "string" && m.content.trim())
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch {
+    return [];
+  }
+}
+
+/** Fire-and-forget: extract facts from conversation tail, save to Firebase. */
+async function extractMemoriesBackground(messages, uid) {
+  if (!uid || !firebaseReady || !process.env.GROQ_API_KEY) return;
+  if (!Array.isArray(messages) || messages.length < 2) return;
+
+  const systemPrompt = `You are a precision memory extraction AI. Analyze this conversation snippet and extract 0–3 important, reusable facts ABOUT THE USER that would genuinely help personalize future conversations.
+
+EXTRACTION RULES:
+- Only extract facts the USER explicitly stated about themselves (not questions they asked)
+- Target: name, age, profession, location, skills, ongoing projects, strong preferences, clear goals
+- Each memory = one clear sentence starting with "User"
+- Category options: "personal" (identity/demographics), "preference" (tastes/style/habits), "project" (active work/goals), "context" (important background knowledge)
+- Be conservative — only facts that are genuinely memorable and reusable across future chats
+- If nothing worth remembering, return exactly: []
+- CRITICAL: Return ONLY a valid JSON array. No explanation, no markdown fences, no extra text.
+
+Example output: [{"content":"User is a 20-year-old computer science student in India","category":"personal"},{"content":"User prefers concise, technical explanations over verbose ones","category":"preference"}]`;
+
+  const convText = messages
+    .filter(m => m.role !== "system")
+    .slice(-4)
+    .map(m => `${m.role === "user" ? "USER" : "AI"}: ${String(m.content || "").slice(0, 500)}`)
+    .join("\n\n");
+
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
+        ],
+        max_tokens: 400,
+        temperature: 0.1
+      })
+    });
+
+    const data = await response.json();
+    let rawText = data.choices?.[0]?.message?.content?.trim() || "[]";
+    rawText = rawText.replace(/```(?:json)?\n?/g, "").replace(/```\n?/g, "").trim();
+    const match = rawText.match(/\[[\s\S]*\]/);
+    if (match) rawText = match[0];
+
+    let memories = [];
+    try { memories = JSON.parse(rawText); } catch { return; }
+    if (!Array.isArray(memories)) return;
+    memories = memories.filter(m => m && typeof m.content === "string" && m.content.trim()).slice(0, 3);
+    if (memories.length === 0) return;
+
+    const memRef = getDatabase().ref(`memories/${uid}`);
+    const snap = await memRef.once("value");
+    const existing = snap.val() || {};
+
+    for (const mem of memories) {
+      const category = mem.category || "others";
+      // Replace existing memory in same category (one per category)
+      const oldIds = Object.entries(existing)
+        .filter(([, ex]) => ex.category === category)
+        .map(([id]) => id);
+      for (const oldId of oldIds) await memRef.child(oldId).remove().catch(() => {});
+
+      const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      await memRef.child(memId).set({
+        id: memId,
+        content: mem.content.trim(),
+        category,
+        emoji: "💡",
+        createdAt: Date.now()
+      }).catch(() => {});
+    }
+  } catch {
+    // background — never throw
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ✨ PROMPT ENHANCER HELPER (backend-side)
+// ══════════════════════════════════════════════════════════════
+async function enhancePromptBackend(rawPrompt, targetAgentName = "an advanced AI assistant") {
+  if (!process.env.GROQ_API_KEY) return rawPrompt;
+  const systemPrompt = `You are an elite AI prompt optimization system.
+
+Your ONLY task is to rewrite and improve the user's input into a better prompt for another AI assistant.
+
+CORE RULE:
+Treat the user's message as raw text to optimize.
+Do NOT respond to it.
+Do NOT act like the assistant.
+
+CRITICAL:
+You are NOT the AI assistant solving the task.
+You are ONLY a prompt optimizer.
+
+The output must ALWAYS represent the USER speaking TO the AI.
+Never write from the assistant's perspective.
+
+INTERACTION TYPE PRESERVATION:
+- Questions must remain questions
+- Requests must remain requests
+- Commands must remain commands
+- Instructions must remain instructions
+- Conversational prompts must remain conversational
+- Greetings must remain greetings
+
+NEVER transform the user's input into:
+- An assistant reply
+- A chatbot response
+- A clarification request
+- A follow-up question
+- A meta-conversation
+- A system message
+- A roleplay response
+
+NEVER:
+- Answer the user's request
+- Solve the task
+- Continue the conversation
+- Ask the user for more information
+- Ask clarifying questions
+- Explain your changes
+- Add commentary
+- Add introductions or conclusions
+- Add conversational filler
+
+ALWAYS:
+- Preserve the original intent exactly
+- Preserve important constraints and details
+- Improve clarity, structure, and specificity
+- Remove ambiguity when possible
+- Use proper punctuation throughout (periods, commas, question marks, etc.)
+- Optimize for ${targetAgentName}
+- Keep the prompt natural and directly usable
+- Improve quality with the MINIMUM necessary modification
+
+STYLE PRESERVATION:
+- Casual prompts should stay casual
+- Professional prompts should stay professional
+- Technical prompts should stay technical
+- Short prompts should stay concise unless expansion is clearly useful
+
+DO NOT:
+- Over-expand short prompts
+- Make prompts unnecessarily verbose
+- Turn casual prompts into formal or academic language
+- Add technical detail unless it genuinely improves the request
+- Change the meaning, tone, or category of the request
+
+SPECIAL CASES:
+- Greetings should usually remain unchanged
+- Small talk should remain natural and conversational
+- Very short prompts should only be lightly improved
+- If the prompt is already good, improve it only slightly
+
+If the user's prompt is vague:
+- Infer the most likely intent
+- Improve clarity WITHOUT asking questions
+- Do not convert ambiguity into a clarification request
+
+OUTPUT RULES:
+- Return ONLY the rewritten prompt
+- No labels
+- No explanations
+- No markdown
+- No quotation marks
+- No code fences
+- No extra text before or after the prompt`;
+
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: rawPrompt }
+        ],
+        max_tokens: 500,
+        temperature: 0.3
+      })
+    });
+    const data = await response.json();
+    const enhanced = data.choices?.[0]?.message?.content?.trim();
+    return (enhanced && enhanced.length > 0) ? enhanced : rawPrompt;
+  } catch {
+    return rawPrompt;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🌐 WEB SEARCH HELPER (backend-side, context-aware)
+// ══════════════════════════════════════════════════════════════
+async function planAndFetchWebContext(rawPrompt, recentHistory = [], memories = []) {
+  if (!process.env.GROQ_API_KEY) {
+    // No planner available — try a direct search anyway
+    const fallbackData = await fetchWebContextForBranch(rawPrompt, { name: rawPrompt, possibilities: [] });
+    return { shouldSearch: !!fallbackData, searchQuery: rawPrompt, webData: fallbackData };
+  }
+
+  // ── Step 1: Context-aware planning ──
+  const systemMsg = `You are a web-search query planner. You help decide whether a live web search is needed to answer the user's message, and craft the best possible search query if so.
+
+You receive:
+- The user's current message
+- Their recent conversation history (current chat session only)
+- Their personal memory context (facts learned from previous sessions)
+
+Return ONLY a raw JSON object — no markdown, no backticks, no explanation:
+{"should_search": <true|false>, "search_query": "<optimised query or empty string>"}
+
+Decision rules:
+- Return should_search: FALSE for: greetings, pure coding questions (syntax, algorithms, debugging) unless asking about latest versions/releases, math, logic, abstract reasoning, or any question fully answerable from the conversation history or general training knowledge.
+- Return should_search: TRUE for: current events, prices, recent news, latest library/framework versions, specific product or company info, people ("who is..."), comparisons with recency ("X vs Y in 2026"), and anything where training data may be outdated.
+
+Query crafting rules:
+- Resolve pronouns and references using conversation history ("that framework" → infer from prior messages)
+- Use memory context to personalise queries where helpful (e.g. memory says user is in Haryana → include location for location-specific queries)
+- The search_query MUST be 3-10 words, specific, and Google-optimised
+- Include the current year only when recency truly matters`;
+
+  const historyText = recentHistory.length > 0
+    ? recentHistory.map(m => `${m.role === "user" ? "User" : "AI"}: ${m.content}`).join("\n")
+    : "No prior messages.";
+
+  const memoryLines = memories.length > 0
+    ? memories.map(m => `• ${m.content}`).join("\n")
+    : "None";
+
+  const userMsg = `User memories:\n${memoryLines}\n\nRecent conversation:\n${historyText}\n\nCurrent user message: "${rawPrompt}"`;
+
+  let shouldSearch = false;
+  let searchQuery = rawPrompt;
+
+  try {
+    const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: systemMsg },
+          { role: "user", content: userMsg }
+        ],
+        max_tokens: 80,
+        temperature: 0.1,
+        response_format: { type: "json_object" }
+      }),
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (groqRes.ok) {
+      const groqData = await groqRes.json();
+      const raw = groqData.choices?.[0]?.message?.content || "{}";
+      try {
+        const parsed = JSON.parse(raw);
+        shouldSearch = parsed.should_search === true;
+        searchQuery = (parsed.search_query || rawPrompt).trim();
+      } catch {
+        shouldSearch = true;
+      }
+    } else {
+      shouldSearch = true;
+    }
+  } catch {
+    shouldSearch = true;
+  }
+
+  if (!shouldSearch) {
+    return { shouldSearch: false, searchQuery, webData: null };
+  }
+
+  // ── Step 2: Fetch web results ──
+  const webData = await fetchWebContextForBranch(searchQuery, { name: searchQuery, possibilities: [] });
+  return { shouldSearch: true, searchQuery, webData };
+}
+
+// ══════════════════════════════════════════════════════════════
 //  🤖 CHAT ENDPOINT — full marker processing on backend
 //  Replaces per-agent streaming endpoints for marker-aware chat
 // ══════════════════════════════════════════════════════════════
@@ -2305,6 +2627,301 @@ app.post("/api/chat", async (req, res) => {
 });
 
 app.get("/health", (req, res) => res.send("OK"));
+
+// ══════════════════════════════════════════════════════════════
+//  🚀 UNIFIED /api/chat-enhanced — One endpoint, all features
+//  Orchestrates: Enhance → Web Search → Memory → Stream → Markers → Memory Extract
+// ══════════════════════════════════════════════════════════════
+app.post("/api/chat-enhanced", async (req, res) => {
+  const { messages, agent, rawPrompt, options = {} } = req.body;
+  const {
+    enhance: enableEnhance = true,
+    webSearch: enableWebSearch = true,
+    memories: enableMemories = true
+  } = options;
+
+  if (!messages || !Array.isArray(messages) || !agent || !rawPrompt) {
+    return res.status(400).json({ error: "messages, agent, and rawPrompt are required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const sendEvent = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // ── Resolve authenticated uid (optional — for memory) ──
+  let uid = null;
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader) uid = await getUserUid(authHeader);
+  } catch {}
+
+  try {
+    // ── STEP 1: Load user memories from Firebase ──
+    let userMemories = [];
+    if (enableMemories && uid) {
+      try {
+        userMemories = await loadMemoriesFromFirebase(uid);
+        if (userMemories.length > 0) {
+          sendEvent({ type: "status", message: `🧠 Loaded ${userMemories.length} memor${userMemories.length === 1 ? "y" : "ies"}…` });
+        }
+      } catch { /* non-critical */ }
+    }
+
+    // ── STEP 2: Enhance the prompt ──
+    let finalPrompt = rawPrompt;
+    if (enableEnhance) {
+      sendEvent({ type: "status", message: "✨ Enhancing your prompt…" });
+      const agentNames = { gemini: "Gemini Flash", mistral: "Mistral Large", codestral: "Codestral", groq: "LLaMA Groq" };
+      const targetAgentName = agentNames[agent] || "an advanced AI assistant";
+      try {
+        const enhanced = await enhancePromptBackend(rawPrompt, targetAgentName);
+        if (enhanced && enhanced !== rawPrompt) {
+          finalPrompt = enhanced;
+          sendEvent({ type: "enhanced", enhancedPrompt: finalPrompt });
+        }
+      } catch { /* non-critical — use raw prompt */ }
+    }
+
+    // ── STEP 3: Context-aware web search ──
+    let webData = null;
+    let searchQuery = null;
+    const trivialTest = /^(hi|hello|hey|hiya|yo|sup|thanks|thank you|bye|good morning|good night|good afternoon|good evening|yes|no|ok|okay|sure|alright|lol|haha|nice|great|awesome|cool|maybe|idk|oh|ah|um|hmm)[\s!?.]*$/i.test(rawPrompt.trim()) || rawPrompt.trim().length < 3;
+
+    if (enableWebSearch && !trivialTest) {
+      sendEvent({ type: "status", message: "🧠 Planning search strategy…" });
+      const recentHistory = messages
+        .filter(m => m.role !== "system")
+        .slice(-6)
+        .map(m => ({ role: m.role, content: String(m.content || "").slice(0, 400) }));
+
+      try {
+        const plan = await planAndFetchWebContext(rawPrompt, recentHistory, userMemories);
+        if (plan.shouldSearch) {
+          searchQuery = plan.searchQuery;
+          sendEvent({ type: "status", message: `🌐 Searching: "${plan.searchQuery}"…` });
+          webData = plan.webData;
+          if (webData) {
+            sendEvent({
+              type: "web_results",
+              count: webData.results?.length || 0,
+              service: webData.service || "Web",
+              query: plan.searchQuery,
+              answer: webData.answer || null,
+              results: (webData.results || []).slice(0, 6).map(r => ({
+                title: r.title,
+                url: r.url,
+                snippet: (r.snippet || r.content || "").slice(0, 200),
+                date: r.date || null
+              }))
+            });
+          }
+        } else {
+          sendEvent({ type: "search_plan", shouldSearch: false, reason: "Query answered by training data" });
+        }
+      } catch { /* web search failure is non-critical */ }
+    }
+
+    // ── STEP 4: Build final message set ──
+    const BASE_SYSTEM_PROMPT = "You are Orblen AI, a helpful, advanced AI assistant with live web search capabilities. When web search results are provided below the user's message, you MUST synthesize BOTH your training knowledge AND the web data to produce the best possible answer. Use real-time numbers, figures, and information from the web to make your response accurate and current, while also leveraging your training knowledge to provide context, trends across years, and deeper understanding. Cite web sources by number like [1]. When no web results are provided, answer from your training knowledge only. IMPORTANT: Always use proper punctuation (periods, commas, question marks, etc.) in every response. Default to short, concise, effective answers. There is no fixed word limit: expand only when the user's request, task complexity, safety, code or document output, research/debate mode, or necessary nuance clearly requires more detail. Structure your response using focused bullet points or compact paragraphs where appropriate. Avoid padding, repetition, unnecessary background, and raw walls of text.";
+
+    // Memory saving instructions
+    const memorySysAppend = `\n\nYou have a persistent memory system. Use the SAVE_MEMORY marker to store facts about the user. You can save flat facts, structured data, or an array of distinct facts:\n\nFlat: [SAVE_MEMORY]{"content":"User prefers concise answers with bullet points"}[/SAVE_MEMORY]\nArray of distinct facts (RECOMMENDED for multiple new facts): [SAVE_MEMORY][{"content":"User is pursuing BCA at Chandigarh University", "category":"education"}, {"content":"User values direct communication", "category":"preferences"}][/SAVE_MEMORY]\nOnly save unique facts not already in memory (see context above). No opinions — only factual preferences and traits.`;
+
+    let sysContent = BASE_SYSTEM_PROMPT;
+
+    if (userMemories.length > 0) {
+      const memLines = userMemories.map(m => `• ${m.content}`).join("\n");
+      sysContent += `\n\nAdditionally, here is relevant context about the user, learned from previous conversations:\n${memLines}\n\nUse this context naturally and helpfully when relevant. Do not explicitly tell the user that you have a stored memory system — just respond in a personalized, aware way.`;
+    }
+
+    sysContent += memorySysAppend;
+
+    // Build web context block
+    let webContextBlock = "";
+    if (webData && webData.results && webData.results.length > 0) {
+      const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+      webContextBlock = `\n\n────────────────────────────────────────\nLIVE WEB SEARCH RESULTS\nQuery: "${searchQuery}"\nRetrieved: ${today} | Source: ${webData.service || "Web"}\n────────────────────────────────────────\n`;
+      if (webData.answer) webContextBlock += `📋 AI Summary: ${webData.answer}\n\n`;
+      webData.results.slice(0, 6).forEach((r, i) => {
+        webContextBlock += `[${i + 1}] ${r.title || "Result"}`;
+        if (r.date) webContextBlock += ` (${r.date})`;
+        webContextBlock += "\n";
+        const snippet = (r.snippet || r.content || "").slice(0, 350).trim();
+        if (snippet) webContextBlock += `   ${snippet}\n`;
+        if (r.url) webContextBlock += `   🔗 ${r.url}\n`;
+        webContextBlock += "\n";
+      });
+      webContextBlock += `────────────────────────────────────────\nINSTRUCTIONS:\n• SYNTHESIZE both your training knowledge AND the web data above to produce the best answer.\n• Use real-time numbers, figures, and facts from the web to make your response accurate and current.\n• Cite web sources by number, e.g. [1].\n• If web data conflicts with your training knowledge, defer to the web data (it is more current).\n• Prefer more recent sources for time-sensitive topics.\n\n`;
+    }
+
+    const recentHistory = messages.filter(m => m.role !== "system").slice(-8);
+    const userMsgContent = finalPrompt + webContextBlock;
+    const chatMessages = [
+      { role: "system", content: sysContent },
+      ...recentHistory.slice(0, -1), // all but last (which is the current user message)
+      { role: "user", content: userMsgContent }
+    ];
+
+    // ── STEP 5: Stream the model response ──
+    sendEvent({ type: "status", message: `🤖 Asking ${(agent || "AI").charAt(0).toUpperCase() + (agent || "AI").slice(1)}…` });
+
+    let fullResponse = "";
+
+    if (agent === "groq") {
+      if (!process.env.GROQ_API_KEY) throw new Error("Groq key not configured.");
+      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }
+      const reader = groqRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") break;
+          try { const parsed = JSON.parse(data); const content = parsed.choices?.[0]?.delta?.content || ""; if (content) { fullResponse += content; sendEvent({ type: "token", text: content }); } } catch (_) {}
+        }
+      }
+    } else if (agent === "mistral") {
+      if (!process.env.MISTRAL_API_KEY) throw new Error("Mistral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://api.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "mistral-large-latest", messages: chatMessages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agent === "codestral") {
+      if (!process.env.CODESTRAL_API_KEY) throw new Error("Codestral key not configured.");
+      fullResponse = await streamOpenAICompatibleTokens(
+        res,
+        "https://codestral.mistral.ai/v1/chat/completions",
+        { "Authorization": `Bearer ${process.env.CODESTRAL_API_KEY}`, "Content-Type": "application/json" },
+        { model: "codestral-latest", messages: chatMessages, max_tokens: 16384 },
+        sendEvent
+      );
+    } else if (agent === "gemini") {
+      if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+      // For Gemini, build a flattened prompt
+      const geminiPrompt = chatMessages.map(m => m.content).join("\n\n");
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse&key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: geminiPrompt }] }] })
+        }
+      );
+      if (!response.ok) { const text = await response.text(); throw new Error(`Gemini API error (${response.status}): ${text.slice(0, 200)}`); }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          try { const parsed = JSON.parse(data); const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || ""; if (text) { fullResponse += text; sendEvent({ type: "token", text }); } } catch (_) {}
+        }
+      }
+    } else {
+      // Other Gemini-family agents routed through Gemini key
+      if (!process.env.GEMINI_API_KEY) throw new Error("Gemini key not configured.");
+      const geminiPrompt = chatMessages.map(m => m.content).join("\n\n");
+      const agentModelMap = {
+        "gemma": "gemma-3-27b-it",
+        "gemini-pro": "gemini-pro",
+        "gemini-thinking": "gemini-2.0-flash-thinking-exp"
+      };
+      const model = agentModelMap[agent] || "gemini-3.5-flash";
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: geminiPrompt }] }] })
+        }
+      );
+      if (!response.ok) { const text = await response.text(); throw new Error(`${agent} API error (${response.status}): ${text.slice(0, 200)}`); }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          try { const parsed = JSON.parse(data); const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || ""; if (text) { fullResponse += text; sendEvent({ type: "token", text }); } } catch (_) {}
+        }
+      }
+    }
+
+    // ── STEP 6: Process SAVE_MEMORY markers ──
+    sendEvent({ type: "done", result: fullResponse });
+
+    let displayText = fullResponse;
+    let memorySaved = false;
+
+    if (uid) {
+      const { cleanText } = await processMarkers(fullResponse, uid);
+      displayText = cleanText;
+      memorySaved = cleanText !== fullResponse;
+    } else {
+      // Strip SAVE_MEMORY markers from display text even if not saved
+      displayText = fullResponse
+        .replace(/\[SAVE_MEMORY\][\s\S]*?\[\/SAVE_MEMORY\]/g, "🧠 Memory saved")
+        .trim();
+    }
+
+    sendEvent({ type: "processed", displayText, cleanText: displayText, memorySaved });
+
+    // ── STEP 7: Background memory extraction (fire-and-forget) ──
+    if (uid && enableMemories) {
+      const allMessages = [
+        ...messages.filter(m => m.role !== "system").slice(-3),
+        { role: "assistant", content: displayText }
+      ];
+      extractMemoriesBackground(allMessages, uid).then(() => {
+        // Memory extraction is complete — this runs in background
+      }).catch(() => {});
+    }
+
+    res.end();
+  } catch (err) {
+    console.error("[/api/chat-enhanced] Error:", err.message);
+    sendEvent({ type: "error", message: err.message });
+    res.end();
+  }
+});
+
+
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
