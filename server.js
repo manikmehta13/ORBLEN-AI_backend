@@ -344,10 +344,10 @@ function getBackendAgentName(a) {
   return BACKEND_AGENT_NAMES[a] || "AI Agent";
 }
 
-const RESPONSE_STYLE_INSTRUCTION = "Default to short, concise, effective answers. There is no fixed word limit: expand only when the user's request, task complexity, safety, code or document output, research/debate mode, or necessary nuance clearly requires more detail. Use focused bullet points or compact paragraphs where appropriate. Avoid padding, repetition, unnecessary background, and raw walls of text.";
+const RESPONSE_STYLE_INSTRUCTION = "Default to short, concise, direct answers. Expand only when complexity or detail is required. Avoid filler and repetition.";
 
 function hasResponseStyleInstruction(messages) {
-  return messages.some(m => typeof m.content === "string" && m.content.includes("Default to short, concise, effective answers"));
+  return messages.some(m => typeof m.content === "string" && m.content.includes("Default to short, concise, direct answers"));
 }
 
 function addResponseStyleInstructionToMessages(messages) {
@@ -364,7 +364,7 @@ function addResponseStyleInstructionToMessages(messages) {
 }
 
 function addResponseStyleInstructionToPrompt(prompt) {
-  if (typeof prompt !== "string" || prompt.includes("Default to short, concise, effective answers")) return prompt;
+  if (typeof prompt !== "string" || prompt.includes("Default to short, concise, direct answers")) return prompt;
   return `[Response Style Instruction: ${RESPONSE_STYLE_INSTRUCTION}]\n\n${prompt}`;
 }
 
@@ -699,12 +699,30 @@ async function processMarkers(text, uid) {
           }
 
           function replaceOrCreate(category, content) {
-            const existingIds = Object.entries(existing)
-              .filter(([, mem]) => mem.category === category)
-              .map(([id]) => id);
-            for (const id of existingIds) memRef.child(id).remove();
-            const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-            memRef.child(memId).set({ id: memId, content, category, emoji: '💡', createdAt: Date.now() });
+            const trimmedContent = content.trim();
+            // Check if there is an exact or near-identical duplicate to prevent duplicate double-saving
+            const isDuplicate = Object.values(existing).some(
+              mem => mem.category === category && mem.content.toLowerCase().trim() === trimmedContent.toLowerCase()
+            );
+            if (isDuplicate) return;
+
+            // If the content is updating a key term like email or phone, we can replace that specific one
+            let replaced = false;
+            const terms = ["email", "phone", "mobile", "number", "name", "location", "city"];
+            const matchedTerm = terms.find(t => trimmedContent.toLowerCase().includes(t));
+            if (matchedTerm) {
+              const matchingOldId = Object.entries(existing)
+                .find(([, mem]) => mem.category === category && mem.content.toLowerCase().includes(matchedTerm))?.[0];
+              if (matchingOldId) {
+                memRef.child(matchingOldId).set({ id: matchingOldId, content: trimmedContent, category, emoji: '💡', createdAt: Date.now() });
+                replaced = true;
+              }
+            }
+
+            if (!replaced) {
+              const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+              memRef.child(memId).set({ id: memId, content: trimmedContent, category, emoji: '💡', createdAt: Date.now() });
+            }
           }
 
           if (Array.isArray(p)) {
@@ -2217,31 +2235,51 @@ async function loadMemoriesFromFirebase(uid) {
   }
 }
 
-/** Fire-and-forget: extract facts from conversation tail, save to Firebase. */
+/** Fire-and-forget: extract facts from conversation tail, save/update/delete in Firebase RTDB dynamically. */
 async function extractMemoriesBackground(messages, uid) {
   if (!uid || !firebaseReady || !process.env.GROQ_API_KEY) return;
   if (!Array.isArray(messages) || messages.length < 2) return;
 
-  const systemPrompt = `You are a precision memory extraction AI. Analyze this conversation snippet and extract 0–3 important, reusable facts ABOUT THE USER that would genuinely help personalize future conversations.
+  try {
+    const memRef = getDatabase().ref(`memories/${uid}`);
+    const snap = await memRef.once("value");
+    const existingObj = snap.val() || {};
+    const existingList = Object.values(existingObj)
+      .map(m => `- ID: "${m.id}" | Category: "${m.category}" | Content: "${m.content}"`)
+      .join("\n");
+
+    const systemPrompt = `You are a precision profile memory manager. You keep track of key details, preferences, projects, and context about a user.
+
+Your task is to analyze a conversation snippet and determine if any changes (additions, updates, or deletions) need to be made to the user's saved profile memories based on what they just said.
+
+Here is the USER'S CURRENT SAVED PROFILE MEMORIES:
+${existingList || "None"}
 
 EXTRACTION RULES:
-- Only extract facts the USER explicitly stated about themselves (not questions they asked)
-- Target: name, age, profession, location, skills, ongoing projects, strong preferences, clear goals
-- Each memory = one clear sentence starting with "User"
-- Category options: "personal" (identity/demographics), "preference" (tastes/style/habits), "project" (active work/goals), "context" (important background knowledge)
-- Be conservative — only facts that are genuinely memorable and reusable across future chats
-- If nothing worth remembering, return exactly: []
-- CRITICAL: Return ONLY a valid JSON array. No explanation, no markdown fences, no extra text.
+1. "add": Use this action if the user explicitly stated a new key fact (e.g. email, phone number, location, active project) that is NOT already represented in the list.
+   - Do NOT replace/overwrite existing unrelated memories in the same category. For example, if the user has an email address stored, and they state a phone number, do NOT delete/overwrite the email address. Keep both.
+   - Content should be one clear sentence starting with "User" (e.g. "User's email is test@example.com").
+   - Category options: "personal", "preference", "project", "context" (use "personal" for identity/contact details).
+2. "update": Use this action if the user corrected or updated a previously stored fact (e.g. they changed their email address or job). Specify the target memory ID from the list.
+3. "delete": Use this action if the user explicitly requested to forget a specific fact, or if it is no longer true. Specify the target memory ID.
+4. "none": If no changes are needed, return an empty array.
 
-Example output: [{"content":"User is a 20-year-old computer science student in India","category":"personal"},{"content":"User prefers concise, technical explanations over verbose ones","category":"preference"}]`;
+Be conservative: only store facts that are genuinely useful, factual, and reusable. Do not record opinions or temporary chat context.
 
-  const convText = messages
-    .filter(m => m.role !== "system")
-    .slice(-4)
-    .map(m => `${m.role === "user" ? "USER" : "AI"}: ${String(m.content || "").slice(0, 500)}`)
-    .join("\n\n");
+CRITICAL: Return ONLY a valid JSON array of operations, and absolutely nothing else. No markdown, no formatting fences, no explanations.
 
-  try {
+Example output:
+[
+  { "action": "add", "category": "personal", "content": "User's phone number is +1-555-0199" },
+  { "action": "update", "id": "mem_123456", "content": "User's email is newaddress@domain.com" }
+]`;
+
+    const convText = messages
+      .filter(m => m.role !== "system")
+      .slice(-4)
+      .map(m => `${m.role === "user" ? "USER" : "AI"}: ${String(m.content || "").slice(0, 500)}`)
+      .join("\n\n");
+
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -2252,7 +2290,7 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
         model: "llama-3.3-70b-versatile",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Extract memorable user facts from this conversation:\n\n${convText}` }
+          { role: "user", content: `Analyze the exchange and generate the JSON operations list:\n\n${convText}` }
         ],
         max_tokens: 400,
         temperature: 0.1
@@ -2265,32 +2303,63 @@ Example output: [{"content":"User is a 20-year-old computer science student in I
     const match = rawText.match(/\[[\s\S]*\]/);
     if (match) rawText = match[0];
 
-    let memories = [];
-    try { memories = JSON.parse(rawText); } catch { return; }
-    if (!Array.isArray(memories)) return;
-    memories = memories.filter(m => m && typeof m.content === "string" && m.content.trim()).slice(0, 3);
-    if (memories.length === 0) return;
+    let operations = [];
+    try {
+      operations = JSON.parse(rawText);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(operations)) return;
 
-    const memRef = getDatabase().ref(`memories/${uid}`);
-    const snap = await memRef.once("value");
-    const existing = snap.val() || {};
+    const MEMORY_EMOJI = {
+      personal: "👤",
+      personal_information: "👤",
+      contact_information: "📞",
+      location: "📍",
+      preference: "❤️",
+      preferences: "❤️",
+      communication_style: "💬",
+      project: "🚀",
+      projects: "🚀",
+      education: "🎓",
+      technical_skills: "🛠️",
+      skills: "🛠️",
+      programming_languages: "💻",
+      others: "📦",
+      context: "💡"
+    };
 
-    for (const mem of memories) {
-      const category = mem.category || "others";
-      // Replace existing memory in same category (one per category)
-      const oldIds = Object.entries(existing)
-        .filter(([, ex]) => ex.category === category)
-        .map(([id]) => id);
-      for (const oldId of oldIds) await memRef.child(oldId).remove().catch(() => {});
-
-      const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-      await memRef.child(memId).set({
-        id: memId,
-        content: mem.content.trim(),
-        category,
-        emoji: "💡",
-        createdAt: Date.now()
-      }).catch(() => {});
+    for (const op of operations) {
+      if (!op || typeof op !== "object") continue;
+      const { action, id, category, content } = op;
+      const cat = category || "others";
+      const emoji = MEMORY_EMOJI[cat] || "💡";
+      
+      if (action === "add" && content && content.trim()) {
+        const memId = `mem_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+        await memRef.child(memId).set({
+          id: memId,
+          content: content.trim(),
+          category: cat,
+          emoji,
+          createdAt: Date.now()
+        }).catch(() => {});
+      } else if (action === "update" && id && content && content.trim()) {
+        if (existingObj[id]) {
+          const finalCat = category || existingObj[id].category || "others";
+          const finalEmoji = MEMORY_EMOJI[finalCat] || "💡";
+          await memRef.child(id).update({
+            content: content.trim(),
+            category: finalCat,
+            emoji: finalEmoji,
+            createdAt: Date.now()
+          }).catch(() => {});
+        }
+      } else if (action === "delete" && id) {
+        if (existingObj[id]) {
+          await memRef.child(id).remove().catch(() => {});
+        }
+      }
     }
   } catch {
     // background — never throw
@@ -2728,7 +2797,7 @@ app.post("/api/chat-enhanced", async (req, res) => {
     }
 
     // ── STEP 4: Build final message set ──
-    const BASE_SYSTEM_PROMPT = "You are Orblen AI, a helpful, advanced AI assistant with live web search capabilities. When web search results are provided below the user's message, you MUST synthesize BOTH your training knowledge AND the web data to produce the best possible answer. Use real-time numbers, figures, and information from the web to make your response accurate and current, while also leveraging your training knowledge to provide context, trends across years, and deeper understanding. Cite web sources by number like [1]. When no web results are provided, answer from your training knowledge only. IMPORTANT: Always use proper punctuation (periods, commas, question marks, etc.) in every response. Default to short, concise, effective answers. There is no fixed word limit: expand only when the user's request, task complexity, safety, code or document output, research/debate mode, or necessary nuance clearly requires more detail. Structure your response using focused bullet points or compact paragraphs where appropriate. Avoid padding, repetition, unnecessary background, and raw walls of text.";
+    const BASE_SYSTEM_PROMPT = "You are Orblen AI, an advanced assistant with live search. Use provided search results to give accurate, up-to-date answers, citing sources as [1]. Default to short, concise responses with proper punctuation. Expand only when necessary for complexity or detail.";
 
     // Memory saving instructions
     const memorySysAppend = `\n\nYou have a persistent memory system. Use the SAVE_MEMORY marker to store facts about the user. You can save flat facts, structured data, or an array of distinct facts:\n\nFlat: [SAVE_MEMORY]{"content":"User prefers concise answers with bullet points"}[/SAVE_MEMORY]\nArray of distinct facts (RECOMMENDED for multiple new facts): [SAVE_MEMORY][{"content":"User is pursuing BCA at Chandigarh University", "category":"education"}, {"content":"User values direct communication", "category":"preferences"}][/SAVE_MEMORY]\nOnly save unique facts not already in memory (see context above). No opinions — only factual preferences and traits.`;
