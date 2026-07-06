@@ -373,6 +373,16 @@ function isGroqAgent(agent) {
   return Object.prototype.hasOwnProperty.call(GROQ_MODEL_MAP, agent);
 }
 
+function getGroqMaxTokens(agent) {
+  if (agent === "groq-gpt-20b" || agent === "groq-llama-8b" || agent === "groq-gemma-9b") {
+    return 1024;
+  }
+  if (agent === "groq") {
+    return 8192;
+  }
+  return 2048;
+}
+
 function getBackendAgentName(a) {
   return BACKEND_AGENT_NAMES[a] || "AI Agent";
 }
@@ -499,7 +509,7 @@ async function callModelBackend(agent, messages) {
       body: JSON.stringify({
         model: groqModel,
         messages,
-        max_tokens: 8192
+        max_tokens: getGroqMaxTokens(agent)
       })
     });
     const data = await response.json();
@@ -868,7 +878,7 @@ async function handleAgenticChatRouteStream(req, res, agentName, isGeminiPrompt 
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: getGroqMaxTokens(agentName), temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) {
@@ -2652,7 +2662,7 @@ app.post("/api/chat", async (req, res) => {
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: groqModel, messages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages, max_tokens: getGroqMaxTokens(agentName), temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }
@@ -2884,7 +2894,7 @@ app.post("/api/chat-enhanced", async (req, res) => {
       const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: 8192, temperature: 0.7, stream: true }),
+        body: JSON.stringify({ model: groqModel, messages: chatMessages, max_tokens: getGroqMaxTokens(agent), temperature: 0.7, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!groqRes.ok) { const errText = await groqRes.text(); throw new Error(`Groq API error (${groqRes.status}): ${errText.slice(0, 200)}`); }
