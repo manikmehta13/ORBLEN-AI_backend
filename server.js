@@ -113,11 +113,7 @@ app.post("/api/mistral", apiChatRoute("mistral"));
 app.post("/api/codestral", apiChatRoute("codestral"));
 app.post("/api/groq", apiChatRoute("groq"));
 app.post("/api/groq-llama-8b", apiChatRoute("groq-llama-8b"));
-app.post("/api/groq-deepseek", apiChatRoute("groq-deepseek"));
-app.post("/api/groq-qwen-32b", apiChatRoute("groq-qwen-32b"));
-app.post("/api/groq-qwen-27b", apiChatRoute("groq-qwen-27b"));
-app.post("/api/groq-gemma-9b", apiChatRoute("groq-gemma-9b"));
-app.post("/api/groq-gemma-27b", apiChatRoute("groq-gemma-27b"));
+
 app.post("/api/groq-gpt-120b", apiChatRoute("groq-gpt-120b"));
 app.post("/api/groq-gpt-20b", apiChatRoute("groq-gpt-20b"));
 
@@ -347,11 +343,7 @@ const BACKEND_AGENT_NAMES = {
   codestral: "Codestral",
   groq: "LLaMA 3.3 70B",
   "groq-llama-8b": "LLaMA 3.1 8B",
-  "groq-deepseek": "DeepSeek R1",
-  "groq-qwen-32b": "Qwen 3 32B",
-  "groq-qwen-27b": "Qwen 3.6 27B",
-  "groq-gemma-9b": "Gemma 2 9B",
-  "groq-gemma-27b": "Gemma 2 27B",
+
   "groq-gpt-120b": "GPT-OSS 120B",
   "groq-gpt-20b": "GPT-OSS 20B"
 };
@@ -360,11 +352,7 @@ const BACKEND_AGENT_NAMES = {
 const GROQ_MODEL_MAP = {
   groq: "llama-3.3-70b-versatile",
   "groq-llama-8b": "llama-3.1-8b-instant",
-  "groq-deepseek": "deepseek-r1-distill-llama-70b",
-  "groq-qwen-32b": "qwen3-32b",
-  "groq-qwen-27b": "qwen-3.6-27b",
-  "groq-gemma-9b": "gemma2-9b-it",
-  "groq-gemma-27b": "gemma-2-27b-it",
+
   "groq-gpt-120b": "openai/gpt-oss-120b",
   "groq-gpt-20b": "openai/gpt-oss-20b"
 };
@@ -374,7 +362,7 @@ function isGroqAgent(agent) {
 }
 
 function getGroqMaxTokens(agent) {
-  if (agent === "groq-gpt-20b" || agent === "groq-llama-8b" || agent === "groq-gemma-9b") {
+  if (agent === "groq-gpt-20b" || agent === "groq-llama-8b") {
     return 1024;
   }
   if (agent === "groq") {
