@@ -1792,10 +1792,10 @@ async function scrapeUrlContent(url) {
 async function enrichSearchResults(results) {
   if (!results || !results.length) return results;
   
-  // Enrich only the top 2 results in parallel to balance detail vs speed
+  // Enrich every result URL in parallel so all returned pages are read
   return await Promise.all(
     results.map(async (r, idx) => {
-      if (idx < 2 && r.url && r.url.startsWith("http")) {
+      if (r.url && r.url.startsWith("http")) {
         const scrapeRes = await scrapeUrlContent(r.url);
         if (scrapeRes && scrapeRes.snippet && !scrapeRes.snippet.startsWith("Unable to retrieve")) {
           return {
@@ -2110,7 +2110,7 @@ Do not add any markup, conversational introductory text, or explanations. Only r
         serviceUsed = "duckduckgo";
       }
 
-      // Crawl and scrape top 2 pages for this query in parallel
+      // Crawl and scrape every returned page for this query in parallel
       const enrichedResults = await enrichSearchResults(results);
 
       // Tag results with the sub-query name
