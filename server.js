@@ -579,7 +579,7 @@ async function fetchWebContextForBranch(topic, branch) {
           query,
           service: "Tavily",
           icon: "🔮",
-          results: result.results.slice(0, 5),
+          results: result.results,
           answer: result.answer || null
         };
       }
@@ -594,7 +594,7 @@ async function fetchWebContextForBranch(topic, branch) {
         query,
         service: "DuckDuckGo",
         icon: "🦆",
-        results: results.slice(0, 5),
+        results,
         answer: null
       };
     }
@@ -2979,7 +2979,7 @@ app.post("/api/chat-enhanced", async (req, res) => {
               service: webData.service || "Web",
               query: plan.searchQuery,
               answer: webData.answer || null,
-              results: (webData.results || []).slice(0, 6).map(r => ({
+              results: (webData.results || []).map(r => ({
                 title: r.title,
                 url: r.url,
                 snippet: (r.snippet || r.content || "").slice(0, 200),
