@@ -1661,9 +1661,35 @@ async function handleDuckDuckGoSearch(query) {
 // ─────────────────────────────────────────────────────────────
 //  Helper: Tavily AI Search (AI-Optimized with Answer)
 // ─────────────────────────────────────────────────────────────
+function getDynamicTavilyMaxResults(query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return 5;
+
+  let maxResults = 5;
+
+  if (/\b(latest|current|recent|today|2026|2025|news|trending|update|updates)\b/.test(q)) {
+    maxResults += 5;
+  }
+  if (/\b(compare|versus|vs|best|top|alternatives|choices|options|review|ratings|rank|ranking)\b/.test(q)) {
+    maxResults += 4;
+  }
+  if (/\b(and|or|plus|also|including)\b/.test(q)) {
+    maxResults += 2;
+  }
+  if (q.length > 80 || q.split(/\s+/).length > 12) {
+    maxResults += 2;
+  }
+  if (q.includes("?")) {
+    maxResults += 1;
+  }
+
+  return Math.max(1, Math.min(20, maxResults));
+}
+
 async function handleTavilySearch(query) {
   try {
     const cleaned = cleanSearchQuery(query) || query;
+    const maxResults = getDynamicTavilyMaxResults(cleaned);
     const response = await fetchWithTimeout("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1671,7 +1697,7 @@ async function handleTavilySearch(query) {
         api_key: process.env.TAVILY_API_KEY,
         query: cleaned,
         topic: "general",
-        max_results: 8,
+        max_results: maxResults,
         include_answer: true
       })
     });
