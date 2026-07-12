@@ -1811,6 +1811,128 @@ async function enrichSearchResults(results) {
 }
 
 // ═════════════════════════════════════════════════════════════
+function dedupeSearchQueries(queries) {
+  const seen = new Set();
+  const cleaned = [];
+
+  for (const q of queries || []) {
+    const value = String(q || "").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(value);
+  }
+
+  return cleaned;
+}
+
+function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function formatSearchResponse(payload, format = "json") {
+  const normalized = String(format || "json").toLowerCase();
+
+  if (normalized === "yaml" || normalized === "yml") {
+    const lines = [
+      `success: ${payload.success ? "true" : "false"}`,
+      `query: ${JSON.stringify(payload.query)}`,
+      `service: ${JSON.stringify(payload.service)}`,
+      `count: ${payload.count ?? 0}`,
+      `answer: ${payload.answer ? JSON.stringify(payload.answer) : "null"}`,
+      `search_queries:`
+    ];
+
+    for (const q of payload.search_queries || []) {
+      lines.push(`  - ${JSON.stringify(q)}`);
+    }
+
+    lines.push(`results:`);
+    for (const result of payload.results || []) {
+      lines.push(`  - title: ${JSON.stringify(result.title || "")}`);
+      lines.push(`    url: ${JSON.stringify(result.url || "")}`);
+      lines.push(`    snippet: ${JSON.stringify(result.snippet || result.content || "")}`);
+      if (result.date) lines.push(`    date: ${JSON.stringify(result.date)}`);
+      if (result.source) lines.push(`    source: ${JSON.stringify(result.source)}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  if (normalized === "xml") {
+    const resultsXml = (payload.results || []).map(result => [
+      "    <result>",
+      `      <title>${escapeXml(result.title || "")}</title>`,
+      `      <url>${escapeXml(result.url || "")}</url>`,
+      `      <snippet>${escapeXml(result.snippet || result.content || "")}</snippet>`,
+      result.date ? `      <date>${escapeXml(result.date)}</date>` : "",
+      result.source ? `      <source>${escapeXml(result.source)}</source>` : "",
+      "    </result>"
+    ].filter(Boolean).join("\n")).join("\n");
+
+    const queriesXml = (payload.search_queries || [])
+      .map(q => `    <query>${escapeXml(q)}</query>`)
+      .join("\n");
+
+    return [
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+      "<search_response>",
+      `  <success>${payload.success ? "true" : "false"}</success>`,
+      `  <query>${escapeXml(payload.query)}</query>`,
+      `  <service>${escapeXml(payload.service)}</service>`,
+      `  <count>${payload.count ?? 0}</count>`,
+      payload.answer ? `  <answer>${escapeXml(payload.answer)}</answer>` : "  <answer />",
+      "  <search_queries>",
+      queriesXml,
+      "  </search_queries>",
+      "  <results>",
+      resultsXml,
+      "  </results>",
+      "</search_response>"
+    ].filter(Boolean).join("\n");
+  }
+
+  if (normalized === "markdown" || normalized === "md") {
+    const lines = [
+      `# Search Results`,
+      ``,
+      `- Query: ${payload.query}`,
+      `- Service: ${payload.service}`,
+      `- Count: ${payload.count ?? 0}`,
+    ];
+
+    if (payload.answer) {
+      lines.push(`- Answer: ${payload.answer}`);
+    }
+
+    if ((payload.search_queries || []).length > 0) {
+      lines.push(``, `## Search Queries`);
+      for (const q of payload.search_queries) {
+        lines.push(`- ${q}`);
+      }
+    }
+
+    lines.push(``, `## Results`);
+    (payload.results || []).forEach((result, index) => {
+      lines.push(`### [${index + 1}] ${result.title || "Result"}`);
+      if (result.url) lines.push(`- URL: ${result.url}`);
+      if (result.date) lines.push(`- Date: ${result.date}`);
+      lines.push(`- Snippet: ${result.snippet || result.content || ""}`);
+      lines.push(``);
+    });
+
+    return lines.join("\n").trim();
+  }
+
+  return JSON.stringify(payload, null, 2);
+}
+
 //  ROUTE 0: Context-Aware Search Query Planner
 //  Receives current chat history + memories + prompt, returns
 //  { should_search: bool, search_query: string }
@@ -1889,7 +2011,7 @@ Query crafting rules:
 //  ROUTE 1: Smart Web Search (Auto-selects best available)
 // ═════════════════════════════════════════════════════════════
 app.post("/api/search", async (req, res) => {
-  const { query, service } = req.body;
+  const { query, service, format } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
   console.log(`[SEARCH] Query: "${query}" | Service: ${service || "auto"}`);
@@ -1905,17 +2027,24 @@ app.post("/api/search", async (req, res) => {
 
   if (urls && urls.length > 0) {
     console.log(`[SEARCH] Direct URLs detected: ${urls.join(", ")}`);
-    const results = await Promise.all(urls.slice(0, 3).map(url => scrapeUrlContent(url)));
-    return res.json({
+    const searchQueries = dedupeSearchQueries(urls);
+    const results = await Promise.all(searchQueries.map(url => scrapeUrlContent(url)));
+    const payload = {
       success: true,
       query,
       results,
       service: "direct_visit",
-      count: results.length
+      count: results.length,
+      search_queries: searchQueries,
+      format: String(format || "json").toLowerCase()
+    };
+    return res.json({
+      ...payload,
+      formatted: formatSearchResponse(payload, format)
     });
   }
 
-  // Generate 2 to 3 distinct queries for parallel search
+  // Generate as many distinct queries as the planner can produce
   let searchQueries = [query];
   
   const getAvailableAgent = () => {
@@ -1929,7 +2058,8 @@ app.post("/api/search", async (req, res) => {
   if (agent) {
     try {
       const prompt = `You are a Search Intent Analyzer. The user wants to find information about: "${query}".
-Output a JSON array containing 2 to 3 distinct search queries (as plain strings) that will help retrieve the most comprehensive, relevant, and updated results for this topic.
+Output a JSON array containing distinct search queries (as plain strings) that will help retrieve the most comprehensive, relevant, and updated results for this topic.
+Use as many query variants as are helpful.
 Format: ["query 1", "query 2"]
 Do not add any markup, conversational introductory text, or explanations. Only return the raw JSON array.`;
       
@@ -1938,7 +2068,7 @@ Do not add any markup, conversational introductory text, or explanations. Only r
       if (match) {
         const parsed = JSON.parse(match[0]);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          searchQueries = parsed.map(q => q.trim()).filter(Boolean).slice(0, 3);
+          searchQueries = dedupeSearchQueries(parsed);
         }
       }
     } catch (err) {
@@ -2018,7 +2148,18 @@ Do not add any markup, conversational introductory text, or explanations. Only r
     results: mergedResults,
     answer: finalAnswer,
     service: "multi_search",
-    count: mergedResults.length
+    count: mergedResults.length,
+    search_queries: searchQueries,
+    format: String(format || "json").toLowerCase(),
+    formatted: formatSearchResponse({
+      success: true,
+      query,
+      results: mergedResults,
+      answer: finalAnswer,
+      service: "multi_search",
+      count: mergedResults.length,
+      search_queries: searchQueries
+    }, format)
   });
 });
 
@@ -2026,17 +2167,22 @@ Do not add any markup, conversational introductory text, or explanations. Only r
 //  ROUTE 2: DuckDuckGo Only (Free, No API Key)
 // ═════════════════════════════════════════════════════════════
 app.post("/api/search/duckduckgo", async (req, res) => {
-  const { query } = req.body;
+  const { query, format } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
   try {
     const results = await handleDuckDuckGoSearch(query);
-    res.json({
+    const payload = {
       success: true,
       query,
       results,
       service: "duckduckgo",
-      count: results.length
+      count: results.length,
+      format: String(format || "json").toLowerCase()
+    };
+    res.json({
+      ...payload,
+      formatted: formatSearchResponse(payload, format)
     });
   } catch (err) {
     res.status(500).json({ error: "Search failed: " + err.message });
@@ -2047,7 +2193,7 @@ app.post("/api/search/duckduckgo", async (req, res) => {
 //  ROUTE 3: Tavily AI Only (Best for AI Research)
 // ═════════════════════════════════════════════════════════════
 app.post("/api/search/tavily", async (req, res) => {
-  const { query } = req.body;
+  const { query, format } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
   if (!process.env.TAVILY_API_KEY) {
@@ -2060,13 +2206,18 @@ app.post("/api/search/tavily", async (req, res) => {
       return res.status(500).json({ error: "Tavily search failed" });
     }
 
-    res.json({
+    const payload = {
       success: true,
       query,
       results: result.results,
       answer: result.answer,
       service: "tavily",
-      count: result.results.length
+      count: result.results.length,
+      format: String(format || "json").toLowerCase()
+    };
+    res.json({
+      ...payload,
+      formatted: formatSearchResponse(payload, format)
     });
   } catch (err) {
     res.status(500).json({ error: "Tavily error: " + err.message });
@@ -2077,7 +2228,7 @@ app.post("/api/search/tavily", async (req, res) => {
 //  ROUTE 4: SerpAPI Only (Google Search Results)
 // ═════════════════════════════════════════════════════════════
 app.post("/api/search/serpapi", async (req, res) => {
-  const { query } = req.body;
+  const { query, format } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
   if (!process.env.SERPAPI_KEY) {
@@ -2086,12 +2237,17 @@ app.post("/api/search/serpapi", async (req, res) => {
 
   try {
     const results = await handleSerpAPISearch(query);
-    res.json({
+    const payload = {
       success: true,
       query,
       results,
       service: "serpapi",
-      count: results.length
+      count: results.length,
+      format: String(format || "json").toLowerCase()
+    };
+    res.json({
+      ...payload,
+      formatted: formatSearchResponse(payload, format)
     });
   } catch (err) {
     res.status(500).json({ error: "SerpAPI error: " + err.message });
