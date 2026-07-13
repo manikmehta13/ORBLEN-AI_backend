@@ -168,7 +168,7 @@ async function handleDuckDuckGoSearch(query) {
       }
     }
 
-    return results.slice(0, 8);
+    return results;
   } catch (err) {
     console.error("DuckDuckGo scraper error:", err.message);
     return [];
@@ -192,7 +192,6 @@ async function handleSerpAPISearch(query) {
       q: cleaned,
       api_key: process.env.SERPAPI_KEY,
       engine: "google",
-      num: 8,
     });
 
     const response = await fetchWithTimeout(`https://serpapi.com/search?${params}`);
@@ -262,7 +261,7 @@ async function scrapeUrlContent(url) {
       .replace(/\s+/g, " ")
       .trim();
 
-    return { title, url, snippet: snippet.slice(0, 3000), source: "Direct Web Visit" };
+    return { title, url, snippet: snippet, source: "Direct Web Visit" };
   } catch (err) {
     console.error(`Error visiting ${url}:`, err.message);
     return {
@@ -292,7 +291,7 @@ async function enrichSearchResults(results) {
       if (r.url && r.url.startsWith("http")) {
         const scrapeRes = await scrapeUrlContent(r.url);
         if (scrapeRes && scrapeRes.snippet && !scrapeRes.snippet.startsWith("Unable to retrieve")) {
-          return { ...r, snippet: scrapeRes.snippet.slice(0, 2000), isEnriched: true };
+          return { ...r, snippet: scrapeRes.snippet, isEnriched: true };
         }
       }
       return r;
@@ -384,7 +383,7 @@ function formatWebContextForPrompt(webContext) {
     block += `[${i + 1}] ${r.title || "Untitled"}`;
     if (r.date) block += ` (${r.date})`;
     block += "\n";
-    const snippet = (r.snippet || r.content || r.text || "").slice(0, 350);
+    const snippet = (r.snippet || r.content || r.text || "");
     if (snippet) block += `   ${snippet}\n`;
     if (r.url) block += `   🔗 ${r.url}\n`;
     block += "\n";
