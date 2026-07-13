@@ -67,9 +67,9 @@ router.post("/live-token", async (req, res) => {
     // Non-critical — allow unauthenticated access
   }
 
-  // ── Simple rate limiter: one token every 10 seconds per user ───────────────
+  // ── Simple rate limiter: one token every 2 seconds per user ───────────────
   const lastToken = activeTokens.get(uid);
-  if (lastToken && Date.now() - lastToken < 10_000) {
+  if (lastToken && Date.now() - lastToken < 2_000) {
     return res.status(429).json({
       error: "Too many requests. Please wait a moment before starting a new ON-AIR session.",
     });
