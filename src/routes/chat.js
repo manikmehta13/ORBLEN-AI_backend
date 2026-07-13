@@ -595,8 +595,14 @@ router.post("/chat-enhanced", async (req, res) => {
       webContextBlock += `────────────────────────────────────────\n`;
     }
 
+    const previousMessages = messages
+      .filter((m) => m.role !== "system")
+      .slice(0, -1)
+      .map((m) => ({ role: m.role, content: String(m.content || "") }));
+
     const chatMessages = [
       { role: "system", content: sysContent },
+      ...previousMessages,
       { role: "user", content: finalPrompt + webContextBlock },
     ];
 
