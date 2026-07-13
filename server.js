@@ -26,6 +26,7 @@ const ttsRoutes = require("./src/routes/tts");
 const deepResearchRoutes = require("./src/routes/deepResearch");
 const debateRoutes = require("./src/routes/debate");
 const chatRoutes = require("./src/routes/chat");
+const liveRoutes = require("./src/routes/live");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -55,6 +56,9 @@ app.use("/api", debateRoutes);
 
 // Chat Orchestration
 app.use("/api", chatRoutes);
+
+// Gemini Live — ON-AIR
+app.use("/api", liveRoutes);
 
 // ── 3. Error Handling Fallback ────────────────────────────────────────────────
 app.use((req, res, next) => {
