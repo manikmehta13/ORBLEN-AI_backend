@@ -94,14 +94,14 @@ router.post("/live-token", async (req, res) => {
     const { GoogleGenAI } = require("@google/genai");
     const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-    // Token expires in 60 seconds — enough to start the WebSocket session
-    const expireTime = new Date(Date.now() + 60 * 1000).toISOString();
+    // Token expires in 12 hours (maximum flexibility for client connection)
+    const expireTime = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
 
     const tokenResponse = await client.authTokens.create({
       config: {
         uses: 1,
         expireTime,
-        newSessionExpireTime: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        newSessionExpireTime: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
         liveConnectConstraints: {
           model: `models/${model}`,
           config: {
