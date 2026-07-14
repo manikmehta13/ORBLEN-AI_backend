@@ -114,7 +114,6 @@ router.post("/live-token", async (req, res) => {
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
-            tools: [{ googleSearch: {} }],
             sessionResumption: {},
           },
         },
