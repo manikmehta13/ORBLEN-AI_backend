@@ -80,12 +80,10 @@ router.post("/live-token", async (req, res) => {
 
   // ── Resolve model ──────────────────────────────────────────────────────────
   const ALLOWED_MODELS = [
-    "gemini-live-2.5-flash-native-audio",
-    "gemini-2.5-flash-native-audio-preview-12-2025",
     "gemini-3.1-flash-live-preview",
-    "gemini-2.0-flash-live-001",
+    "gemini-2.5-flash-live-preview",
   ];
-  const DEFAULT_MODEL = "gemini-live-2.5-flash-native-audio";
+  const DEFAULT_MODEL = "gemini-3.1-flash-live-preview";
   const requestedModel = req.body?.model || DEFAULT_MODEL;
   const model = ALLOWED_MODELS.includes(requestedModel) ? requestedModel : DEFAULT_MODEL;
 
@@ -114,6 +112,10 @@ router.post("/live-token", async (req, res) => {
                 prebuiltVoiceConfig: { voiceName: "Charon" },
               },
             },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            tools: [{ googleSearch: {} }],
+            sessionResumption: {},
           },
         },
         httpOptions: { apiVersion: "v1alpha" },
